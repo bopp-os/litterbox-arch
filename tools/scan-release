@@ -1,0 +1,172 @@
+#!/bin/sh
+# scan-release - the gate between "upstream published a Litterbox release" and "we merge it".
+#
+#   scan-release VERSION [--report FILE]
+#
+# Downloads upstream's tarball for VERSION and compares its three Cargo.lock files with the ones we
+# ship (locks/). The dependency tree is where the exposure is: Litterbox's lockfile lists hundreds
+# of third-party crates. Holds the update (exit 20) if:
+#   1. a crate keeps its name+version but its checksum changed (republished or tampered)
+#   2. a crate comes from anything other than crates.io (git, alternate registry)
+#   3. osv-scanner reports an advisory for the new lockfiles that the shipped ones did not have
+#      (advisories listed with a reason in .osv-scanner.toml are ignored)
+#   4. more than LBX_MAX_NEW_CRATES (default 30) crate names are new
+# Exit 0 = clean, 20 = hold (a human decides), 1 = error. Errors fail closed: if the scan could not
+# run properly, the update must not be merged.
+#
+# Needs: curl, tar, awk, jq, osv-scanner.
+# Test overrides: LBX_ROOT, LITTERBOX_TARBALL_URL_BASE, OSV_SCANNER, LBX_MAX_NEW_CRATES.
+set -eu
+
+ROOT="${LBX_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+LOCKS="$ROOT/locks"
+IGNORE_FILE="$ROOT/.osv-scanner.toml"
+OSV="${OSV_SCANNER:-osv-scanner}"
+MAX_NEW="${LBX_MAX_NEW_CRATES:-30}"
+TARBALL_BASE="${LITTERBOX_TARBALL_URL_BASE:-https://github.com/Gerharddc/litterbox/archive/refs/tags}"
+CRATES="litterbox lbx-init shared"
+LIST_CAP=50
+
+die() { echo "scan-release: $*" >&2; echo "RESULT: error"; exit 1; }
+
+VERSION=''; REPORT=''
+while [ $# -gt 0 ]; do
+  case $1 in
+    --report) [ $# -ge 2 ] || die "--report needs a file"; REPORT=$2; shift 2 ;;
+    -h|--help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*) die "unknown option '$1'" ;;
+    *) [ -z "$VERSION" ] || die "only one VERSION"; VERSION=$1; shift ;;
+  esac
+done
+printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || die "need a VERSION like 0.6.5"
+command -v jq >/dev/null 2>&1 || die "jq is required"
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+mkdir -p "$tmp/new"
+: > "$tmp/findings"
+
+# --- inputs ------------------------------------------------------------------------------------
+for c in $CRATES; do
+  [ -s "$LOCKS/$c/Cargo.lock" ] || die "baseline locks/$c/Cargo.lock is missing; cannot compare"
+done
+curl -fsSL "$TARBALL_BASE/v$VERSION.tar.gz" -o "$tmp/src.tar.gz" || die "could not download $TARBALL_BASE/v$VERSION.tar.gz"
+for c in $CRATES; do
+  mkdir -p "$tmp/new/$c"
+  tar -xzOf "$tmp/src.tar.gz" "Litterbox-$VERSION/$c/Cargo.lock" > "$tmp/new/$c/Cargo.lock" 2>/dev/null \
+    || die "tarball for $VERSION has no $c/Cargo.lock"
+  [ -s "$tmp/new/$c/Cargo.lock" ] || die "$c/Cargo.lock in the $VERSION tarball is empty"
+done
+
+# Every ignore entry needs an id and a non-empty reason; an unexplained ignore is a hole in the gate.
+ignored="$tmp/ignored"; : > "$ignored"
+if [ -f "$IGNORE_FILE" ]; then
+  awk '
+    /^\[\[IgnoredVulns\]\]/ { if (inb && (!hasid || !hasreason)) bad = 1; inb = 1; hasid = 0; hasreason = 0; next }
+    inb && /^id[ \t]*=[ \t]*"[^"]+"/ { hasid = 1 }
+    inb && /^reason[ \t]*=[ \t]*"[^"]+"/ { hasreason = 1 }
+    END { if (inb && (!hasid || !hasreason)) bad = 1; exit bad }' "$IGNORE_FILE" \
+    || die "$IGNORE_FILE has an [[IgnoredVulns]] entry without both an id and a reason"
+  sed -n 's/^id[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$IGNORE_FILE" > "$ignored"
+fi
+
+# --- lockfile structure ---------------------------------------------------------------------------
+# records FILE -> name<TAB>version<TAB>source<TAB>checksum, one line per [[package]]
+records() {
+  awk '
+    function flush() { if (n != "") print n "\t" v "\t" s "\t" c; n = v = s = c = "" }
+    /^\[\[package\]\]/ { flush(); next }
+    /^name = "/     { n = $3; gsub(/"/, "", n) }
+    /^version = "/  { v = $3; gsub(/"/, "", v) }
+    /^source = "/   { s = $3; gsub(/"/, "", s) }
+    /^checksum = "/ { c = $3; gsub(/"/, "", c) }
+    END { flush() }' "$1"
+}
+
+: > "$tmp/old.names"; : > "$tmp/new.names"
+for c in $CRATES; do
+  records "$LOCKS/$c/Cargo.lock" > "$tmp/old.$c.tsv"
+  records "$tmp/new/$c/Cargo.lock" > "$tmp/new.$c.tsv"
+  cut -f1 "$tmp/old.$c.tsv" >> "$tmp/old.names"
+  cut -f1 "$tmp/new.$c.tsv" >> "$tmp/new.names"
+
+  # 1. same name+version, different checksum
+  awk -F'\t' -v c="$c" -v oldf="$tmp/old.$c.tsv" 'FILENAME == oldf { if ($4 != "") old[$1 " " $2] = $4; next }
+    ($1 " " $2) in old && $4 != "" && old[$1 " " $2] != $4 { print "HOLD: checksum changed for " $1 " " $2 " in " c "/Cargo.lock (same version, different bytes)" }' \
+    "$tmp/old.$c.tsv" "$tmp/new.$c.tsv" >> "$tmp/findings"
+
+  # 2. anything that is not crates.io
+  awk -F'\t' -v c="$c" '$3 != "" && $3 != "registry+https://github.com/rust-lang/crates.io-index" && $3 !~ /^sparse\+https:\/\/index\.crates\.io\/?$/ {
+    print "HOLD: " $1 " " $2 " in " c "/Cargo.lock comes from a non-crates.io source: " $3 }' "$tmp/new.$c.tsv" >> "$tmp/findings"
+done
+sort -u "$tmp/old.names" -o "$tmp/old.names"; sort -u "$tmp/new.names" -o "$tmp/new.names"
+comm -13 "$tmp/old.names" "$tmp/new.names" > "$tmp/added"
+comm -23 "$tmp/old.names" "$tmp/new.names" > "$tmp/removed"
+n_added=$(wc -l < "$tmp/added" | tr -d ' '); n_removed=$(wc -l < "$tmp/removed" | tr -d ' ')
+
+# 4. too many new crate names in one go
+if [ "$n_added" -gt "$MAX_NEW" ]; then
+  echo "HOLD: $n_added new crates in one update (limit $MAX_NEW)" >> "$tmp/findings"
+fi
+
+# --- advisories (osv-scanner) --------------------------------------------------------------------
+# scan FILE OUT: runs osv-scanner, writes "ids<TAB>name<TAB>version" lines (ids = id,alias,alias...)
+scan() {
+  rc=0
+  "$OSV" scan --format json -L "$1" > "$tmp/osv.json" 2> "$tmp/osv.err" || rc=$?
+  case $rc in
+    0|1) ;;
+    *) die "osv-scanner failed on $1 (exit $rc): $(head -c 300 "$tmp/osv.err")" ;;
+  esac
+  jq -e . "$tmp/osv.json" >/dev/null 2>&1 || die "osv-scanner printed something that is not JSON for $1"
+  jq -r '.results[]?.packages[]? | .package as $p | .vulnerabilities[]? | [([.id] + (.aliases // [])) | join(","), $p.name, $p.version] | @tsv' \
+    "$tmp/osv.json" >> "$2"
+}
+: > "$tmp/old.vulns"; : > "$tmp/new.vulns"
+command -v "$OSV" >/dev/null 2>&1 || die "osv-scanner not found ($OSV)"
+for c in $CRATES; do
+  scan "$LOCKS/$c/Cargo.lock" "$tmp/old.vulns"
+  scan "$tmp/new/$c/Cargo.lock" "$tmp/new.vulns"
+done
+# Everything the shipped version already had (ids and aliases), plus what we deliberately ignore.
+{ cut -f1 "$tmp/old.vulns" | tr ',' '\n'; cat "$ignored"; } | sed '/^$/d' | sort -u > "$tmp/known"
+# Match on the file name, not NR == FNR: that idiom misfires when the first file is empty (no known advisories).
+awk -F'\t' -v kf="$tmp/known" 'FILENAME == kf { known[$0] = 1; next }
+  { n = split($1, ids, ","); hit = 0; for (i = 1; i <= n; i++) if (ids[i] in known) hit = 1; if (!hit) print }' \
+  "$tmp/known" "$tmp/new.vulns" | sort -u > "$tmp/new.only"
+while IFS="$(printf '\t')" read -r ids name ver; do
+  [ -n "$ids" ] && echo "HOLD: new advisory $ids affects $name $ver (not present in the shipped version)" >> "$tmp/findings"
+done < "$tmp/new.only"
+sort -u "$tmp/old.vulns" > "$tmp/shipped.vulns"
+sort -u "$tmp/findings" -o "$tmp/findings"
+
+# --- report -----------------------------------------------------------------------------------------------
+capped() { # capped FILE: first LIST_CAP lines as bullets, then a count of the rest
+  total=$(wc -l < "$1" | tr -d ' ')
+  head -n "$LIST_CAP" "$1" | sed 's/^/- /'
+  [ "$total" -le "$LIST_CAP" ] || echo "- ... and $((total - LIST_CAP)) more"
+}
+if [ -s "$tmp/findings" ]; then result=hold; else result=clean; fi
+{
+  echo "## Release gate for Litterbox $VERSION"
+  echo
+  if [ "$result" = clean ]; then echo "Result: **clean**"; else echo "Result: **HOLD** (a human has to look at this)"; fi
+  echo
+  if [ -s "$tmp/findings" ]; then echo "### Findings"; sed 's/^HOLD: /- /' "$tmp/findings"; echo; fi
+  echo "### Dependency changes (vs the shipped lockfiles)"
+  echo "- New crate names: $n_added"
+  [ "$n_added" = 0 ] || { sed 's/^/  - /' "$tmp/added" | head -n "$LIST_CAP"; }
+  echo "- Removed crate names: $n_removed"
+  [ "$n_removed" = 0 ] || { sed 's/^/  - /' "$tmp/removed" | head -n "$LIST_CAP"; }
+  echo
+  echo "### Advisories"
+  if [ -s "$tmp/new.only" ]; then echo "- New in $VERSION: $(wc -l < "$tmp/new.only" | tr -d ' ') (see findings)"; else echo "- New in $VERSION: none"; fi
+  echo "- Already present in the shipped version (informational): $(wc -l < "$tmp/shipped.vulns" | tr -d ' ')"
+  if [ -s "$tmp/shipped.vulns" ]; then awk -F'\t' '{ print $1 " " $2 " " $3 }' "$tmp/shipped.vulns" > "$tmp/shipped.txt"; capped "$tmp/shipped.txt" | sed 's/^/  /'; fi
+} > "$tmp/report.md"
+
+cat "$tmp/report.md"
+if [ -n "$REPORT" ]; then cp "$tmp/report.md" "$REPORT"; fi
+echo "RESULT: $result"
+if [ "$result" = clean ]; then exit 0; fi
+exit 20

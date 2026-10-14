@@ -1,0 +1,8 @@
+# Advisories that tools/scan-release should not hold an update for.
+#
+# Every entry MUST carry a reason (what the advisory is, why it does not apply to how
+# Litterbox uses the crate, and who looked). An unexplained ignore is a hole in the gate.
+#
+# [[IgnoredVulns]]
+# id = "RUSTSEC-0000-0000"
+# reason = "Explain why this does not affect Litterbox. Reviewed by <name> on <date>."

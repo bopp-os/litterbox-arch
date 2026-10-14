@@ -1,0 +1,463 @@
+#!/bin/sh
+# litterbox-export - show a program from inside a Litterbox on the host (like distrobox-export)
+#
+# Runs on the HOST. A sandbox must not be able to write launchers onto the host, so this reads the
+# .desktop file and icon out of the Litterbox's container with `podman cp` (nothing is executed
+# inside it), keeps only a whitelist of keys, and writes a launcher that starts the program with
+# `litterbox enter`.
+set -eu
+
+DATA_HOME="${XDG_DATA_HOME:-${HOME:?HOME is not set}/.local/share}"
+APP_DIR="$DATA_HOME/applications"
+ICON_DIR="$DATA_HOME/icons"
+MARK='X-Litterbox-Export'
+BIN_MARK='# litterbox-export:'
+MAX_ICON_BYTES=5242880
+
+die() { echo "litterbox-export: $*" >&2; exit 1; }
+
+usage() {
+  cat <<EOF
+Usage: litterbox-export <name> --app <app> [--boxed | --wrap CMD] [--scheme SCHEME]... [--url-handler] [--delete]
+       litterbox-export <name> --bin <command> [--export-path DIR] [--boxed | --wrap CMD] [--delete]
+       litterbox-export <name> --list
+
+  --app <app>         Add <app> from the Litterbox <name> to the host application menu.
+                      <app> is a .desktop file name (codium, codium.desktop) or part of one.
+  --bin <command>     Create a host command that runs <command> inside the Litterbox.
+  --export-path DIR   Where --bin puts the command (default: ~/.local/bin)
+  --boxed             Run it through boxed-run (private D-Bus session + keyring). Same as --wrap boxed-run
+  --wrap CMD          Run it through CMD inside the Litterbox
+  --scheme SCHEME     Also handle URLs like SCHEME:// (repeatable). For apps whose .desktop file
+                      does not declare the scheme, e.g. --scheme claude
+  --url-handler       Make the launcher the default handler for its URL schemes, so links opened
+                      in your browser reach the app. Browser-level schemes (http, https, mailto,
+                      file, ...) are never registered.
+  --delete            Remove what was exported (needs no running Litterbox)
+  --list              Show what is exported from <name>
+
+Apps are read from /usr/share/applications in the Litterbox image. Files passed from the host
+cannot be opened inside the Litterbox: it only sees its own home.
+EOF
+}
+
+valid_name() {
+  case $1 in
+    ''|*[!A-Za-z0-9._-]*|.*) return 1 ;;
+  esac
+}
+
+valid_token() {
+  case $1 in
+    ''|*[!A-Za-z0-9._+/-]*) return 1 ;;
+  esac
+}
+
+# --- argument parsing -----------------------------------------------------------------------
+[ $# -ge 1 ] || { usage >&2; exit 1; }
+case $1 in -h|--help|help) usage; exit 0 ;; esac
+name=$1; shift
+valid_name "$name" || die "invalid Litterbox name '$name'"
+
+mode=''; target=''; bin_dir="${HOME}/.local/bin"; wrap=''; delete=0
+url_handler=0; extra_schemes=''
+
+set_mode() {
+  [ -z "$mode" ] || die "use only one of --app, --bin, --list"
+  mode=$1; target=$2
+}
+
+while [ $# -gt 0 ]; do
+  case $1 in
+    --app|--bin|--export-path|--wrap|--scheme)
+      [ $# -ge 2 ] || die "$1 needs a value"
+      case $1 in
+        --app) set_mode app "$2" ;;
+        --bin) set_mode bin "$2" ;;
+        --export-path) bin_dir=$2 ;;
+        --wrap) wrap=$2 ;;
+        --scheme)
+          case $2 in
+            [a-z]*) ;;
+            *) die "invalid URL scheme '$2'" ;;
+          esac
+          case $2 in
+            *[!a-z0-9+.-]*) die "invalid URL scheme '$2'" ;;
+          esac
+          extra_schemes="$extra_schemes $2" ;;
+      esac
+      shift 2 ;;
+    --list) set_mode list ''; shift ;;
+    --boxed) wrap=boxed-run; shift ;;
+    --url-handler) url_handler=1; shift ;;
+    --delete) delete=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown option '$1'" ;;
+  esac
+done
+
+[ -n "$mode" ] || { usage >&2; exit 1; }
+if [ -n "$wrap" ]; then valid_token "$wrap" || die "invalid --wrap value '$wrap'"; fi
+if [ "$mode" != app ] && { [ "$url_handler" = 1 ] || [ -n "$extra_schemes" ]; }; then
+  die "--scheme and --url-handler only apply to --app"
+fi
+
+LITTERBOX=$(command -v litterbox || echo /usr/bin/litterbox)
+case $LITTERBOX in
+  *[!A-Za-z0-9._+/-]*) die "unsupported characters in the path to litterbox: $LITTERBOX" ;;
+esac
+
+# --- reading from the container (never executes anything in it) -------------------------------
+cid=''
+
+require_container() {
+  command -v podman >/dev/null 2>&1 || die "podman not found"
+  cid=$(podman ps -a --filter "label=work.litterbox.name=$name" --format '{{.ID}}' | head -n 1)
+  [ -n "$cid" ] || die "no container for '$name'. Build it first: litterbox build $name"
+}
+
+# Strip control characters (keeps tab and newline) from anything that came out of the container.
+clean() { tr -d '\000-\010\013-\037'; }
+
+read_container_file() {
+  podman cp "$cid:$1" - 2>/dev/null | tar -xO 2>/dev/null || true
+}
+
+# fetch <path in container> <destination file>: regular files only, size capped.
+fetch() {
+  tmpf=$(mktemp "$2.XXXXXX")
+  read_container_file "$1" > "$tmpf"
+  if [ -s "$tmpf" ] && [ "$(wc -c < "$tmpf")" -le "$MAX_ICON_BYTES" ]; then
+    chmod 644 "$tmpf"
+    mv "$tmpf" "$2"
+    return 0
+  fi
+  rm -f "$tmpf"
+  return 1
+}
+
+# de_get <key>: first value of <key> in the [Desktop Entry] group, read from stdin.
+de_get() {
+  awk -v k="$1" '
+    /^\[/ { ing = ($0 == "[Desktop Entry]"); next }
+    ing { i = index($0, "="); if (i > 0 && substr($0, 1, i - 1) == k) { print substr($0, i + 1); exit } }'
+}
+
+find_desktop() {
+  arg=$1
+  case $arg in *.desktop) arg=${arg%.desktop} ;; esac
+  case $arg in
+    ''|*[!A-Za-z0-9._+-]*) die "invalid app name '$1'" ;;
+  esac
+  list=$(podman cp "$cid:/usr/share/applications" - 2>/dev/null | tar -t 2>/dev/null \
+    | sed -n 's|^\(\./\)\{0,1\}[^/]*/\([^/]*\.desktop\)$|\2|p' | sort -u || true)
+  [ -n "$list" ] || die "no .desktop files found in /usr/share/applications of '$name'"
+  if printf '%s\n' "$list" | grep -qxF -- "$arg.desktop"; then
+    echo "$arg.desktop"
+    return 0
+  fi
+  matches=$(printf '%s\n' "$list" | grep -iF -- "$arg" || true)
+  count=$(printf '%s\n' "$matches" | sed '/^$/d' | wc -l | tr -d ' ')
+  case $count in
+    0) die "no app matching '$arg' in '$name'" ;;
+    1) echo "$matches" ;;
+    *) echo "litterbox-export: '$arg' matches several apps, be more specific:" >&2
+       printf '  %s\n' "$matches" >&2
+       exit 1 ;;
+  esac
+}
+
+# --- icons ---------------------------------------------------------------------------------------
+ICON_OUT=''
+
+export_icon() {
+  ICON_OUT=''
+  icon=$1
+  [ -n "$icon" ] || return 0
+  case $icon in
+    /*)
+      base=${icon##*/}
+      valid_name "$base" || return 0
+      mkdir -p "$ICON_DIR/litterbox/$name"
+      if fetch "$icon" "$ICON_DIR/litterbox/$name/$base"; then
+        ICON_OUT="$ICON_DIR/litterbox/$name/$base"
+      fi
+      return 0 ;;
+  esac
+  valid_name "$icon" || return 0
+
+  tmpd=$(mktemp -d)
+  podman cp "$cid:/usr/share/icons/hicolor" - 2>/dev/null \
+    | tar -x -C "$tmpd" --no-same-owner --no-same-permissions --wildcards \
+        "hicolor/*/apps/$icon.png" "hicolor/*/apps/$icon.svg" 2>/dev/null || true
+  found=0
+  for f in "$tmpd"/hicolor/*/apps/"$icon".*; do
+    if [ ! -f "$f" ] || [ -L "$f" ]; then continue; fi
+    size=$(basename "$(dirname "$(dirname "$f")")")
+    case $size in *[!A-Za-z0-9x@.]*) continue ;; esac
+    if [ "$(wc -c < "$f")" -gt "$MAX_ICON_BYTES" ]; then continue; fi
+    install -Dm644 "$f" "$ICON_DIR/hicolor/$size/apps/litterbox-$name-$icon.${f##*.}"
+    found=1
+  done
+  rm -rf "$tmpd"
+  if [ "$found" = 1 ]; then ICON_OUT="litterbox-$name-$icon"; return 0; fi
+
+  mkdir -p "$ICON_DIR/litterbox/$name"
+  for ext in png svg xpm; do
+    if fetch "/usr/share/pixmaps/$icon.$ext" "$ICON_DIR/litterbox/$name/$icon.$ext"; then
+      ICON_OUT="$ICON_DIR/litterbox/$name/$icon.$ext"
+      return 0
+    fi
+  done
+}
+
+# --- URL handlers ---------------------------------------------------------------------------------
+MIMEAPPS="${XDG_CONFIG_HOME:-${HOME}/.config}/mimeapps.list"
+
+# scheme_list <MimeType value>: the URL schemes it declares, one per line.
+scheme_list() {
+  printf '%s' "$1" | tr ';' '\n' | sed -n 's|^x-scheme-handler/\([a-z][a-z0-9+.-]*\)$|\1|p'
+}
+
+# Schemes that decide where every link goes. Never claimed automatically.
+is_browser_scheme() {
+  case $1 in
+    http|https|file|ftp|mailto|about|data|javascript) return 0 ;;
+  esac
+  return 1
+}
+
+# register_schemes <host desktop file name> <schemes>
+register_schemes() {
+  if ! command -v xdg-mime >/dev/null 2>&1; then
+    echo "litterbox-export: xdg-mime not found (install xdg-utils); URL handlers not registered" >&2
+    return 0
+  fi
+  for s in $2; do
+    if is_browser_scheme "$s"; then
+      echo "Skipped $s:// (browser-level scheme). Use xdg-mime yourself if you really want it."
+      continue
+    fi
+    if xdg-mime default "$1" "x-scheme-handler/$s"; then
+      echo "Registered $1 as the default handler for $s://"
+    else
+      echo "litterbox-export: xdg-mime could not register $s://" >&2
+    fi
+  done
+}
+
+# unregister_schemes <host desktop file name> <schemes>: only touches entries that point at us.
+unregister_schemes() {
+  [ -f "$MIMEAPPS" ] || return 0
+  for s in $2; do
+    tmp=$(mktemp "$MIMEAPPS.XXXXXX")
+    awk -v mt="x-scheme-handler/$s" -v df="$1" '
+      /^\[/ { grp = $0 }
+      grp == "[Default Applications]" && index($0, mt "=") == 1 {
+        n = split(substr($0, length(mt) + 2), a, ";"); out = ""
+        for (i = 1; i <= n; i++) if (a[i] != "" && a[i] != df) out = out a[i] ";"
+        if (out != "") print mt "=" out
+        next
+      }
+      { print }' "$MIMEAPPS" > "$tmp"
+    if cmp -s "$tmp" "$MIMEAPPS"; then
+      rm -f "$tmp"
+    else
+      chmod --reference="$MIMEAPPS" "$tmp"
+      mv "$tmp" "$MIMEAPPS"
+      echo "Unregistered $1 as the default handler for $s://"
+    fi
+  done
+}
+
+# --- apps --------------------------------------------------------------------------------------
+exported_apps() {
+  for f in "$APP_DIR"/litterbox-"$name"-*.desktop; do
+    if [ -f "$f" ] && grep -qxF "$MARK=$name" "$f"; then echo "$f"; fi
+  done
+}
+
+find_exported_app() {
+  arg=${1%.desktop}
+  exact="$APP_DIR/litterbox-$name-$arg.desktop"
+  if [ -f "$exact" ] && grep -qxF "$MARK=$name" "$exact"; then echo "$exact"; return 0; fi
+  # Deleting must be exact: a fuzzy match could remove a different export.
+  matches=$(exported_apps | grep -iF -- "$arg" || true)
+  echo "litterbox-export: no exported app named '$arg' for '$name'." >&2
+  if [ -n "$matches" ]; then
+    echo "Did you mean one of these? Pass the exact name:" >&2
+    printf '%s\n' "$matches" | sed 's|.*/litterbox-'"$name"'-\(.*\)\.desktop$|  \1|' >&2
+  fi
+  exit 1
+}
+
+export_app() {
+  require_container
+  file=$(find_desktop "$target")
+  text=$(read_container_file "/usr/share/applications/$file" | clean)
+  [ -n "$text" ] || die "could not read $file from '$name'"
+  field() { printf '%s\n' "$text" | de_get "$1"; }
+
+  [ "$(field Type)" = Application ] || die "$file is not an application launcher"
+  [ "$(field Hidden)" != true ] || die "$file is marked Hidden"
+  orig_exec=$(field Exec)
+  [ -n "$orig_exec" ] || die "$file has no Exec line"
+
+  disp=$(field Name); [ -n "$disp" ] || disp=${file%.desktop}
+  term=$(field Terminal); [ "$term" = true ] || term=false
+
+  # MimeType, plus any --scheme additions
+  mime=$(field MimeType)
+  case $mime in ''|*\;) ;; *) mime="$mime;" ;; esac
+  for s in $extra_schemes; do
+    case ";$mime" in
+      *";x-scheme-handler/$s;"*) ;;
+      *) mime="${mime}x-scheme-handler/$s;" ;;
+    esac
+  done
+  schemes=$(scheme_list "$mime")
+  if [ -n "$schemes" ]; then
+    case $orig_exec in
+      *%u*|*%U*) ;;
+      *%f*|*%F*)
+        echo "litterbox-export: warning: $file only accepts files, not URLs, so it will not claim URL schemes" >&2
+        mime=$(printf '%s' "$mime" | tr ';' '\n' | grep -v '^x-scheme-handler/' | tr '\n' ';')
+        schemes='' ;;
+      *) orig_exec="$orig_exec %U" ;;
+    esac
+  fi
+
+  export_icon "$(field Icon)"
+  icon_line=${ICON_OUT:-application-x-executable}
+
+  exec_line="$LITTERBOX enter $name"
+  [ "$term" = false ] || exec_line="$exec_line --tty true --interactive true"
+  exec_line="$exec_line --"
+  [ -z "$wrap" ] || exec_line="$exec_line $wrap"
+  exec_line="$exec_line $orig_exec"
+
+  out="$APP_DIR/litterbox-$name-$file"
+  if [ -e "$out" ] && ! grep -qxF "$MARK=$name" "$out"; then
+    die "$out exists and was not created by litterbox-export"
+  fi
+  mkdir -p "$APP_DIR"
+  tmp=$(mktemp "$APP_DIR/.litterbox-export.XXXXXX")
+  trap 'rm -f "$tmp"' EXIT
+  {
+    echo '[Desktop Entry]'
+    echo 'Type=Application'
+    echo "Name=$disp ($name)"
+    for key in GenericName Comment Keywords Categories StartupWMClass StartupNotify; do
+      val=$(field "$key")
+      if [ -n "$val" ]; then echo "$key=$val"; fi
+    done
+    if [ -n "$mime" ]; then echo "MimeType=$mime"; fi
+    echo "Icon=$icon_line"
+    echo "Exec=$exec_line"
+    echo "Terminal=$term"
+    echo "$MARK=$name"
+    echo "X-Litterbox-Source=$file"
+  } > "$tmp"
+  chmod 644 "$tmp"
+  mv "$tmp" "$out"
+  trap - EXIT
+
+  if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "$APP_DIR" >/dev/null 2>&1 || true
+  fi
+  echo "Exported '$disp' from '$name': $out"
+  if [ -n "$schemes" ]; then
+    if [ "$url_handler" = 1 ]; then
+      register_schemes "litterbox-$name-$file" "$schemes"
+    else
+      echo "URL schemes in this launcher: $(printf '%s' "$schemes" | tr '\n' ' ')"
+      echo "Run again with --url-handler to make it the default handler for them."
+    fi
+  fi
+}
+
+delete_app() {
+  f=$(find_exported_app "$target")
+  icon=$(de_get Icon < "$f")
+  schemes=$(scheme_list "$(de_get MimeType < "$f")")
+  rm -f "$f"
+  unregister_schemes "$(basename "$f")" "$schemes"
+  case $icon in
+    "litterbox-$name-"*)
+      if valid_name "$icon"; then
+        find "$ICON_DIR/hicolor" -type f -name "$icon.*" -delete 2>/dev/null || true
+      fi ;;
+    "$ICON_DIR/litterbox/$name/"*)
+      rm -f "$icon" ;;
+  esac
+  if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "$APP_DIR" >/dev/null 2>&1 || true
+  fi
+  echo "Removed $f"
+}
+
+# --- binaries ------------------------------------------------------------------------------------
+export_bin() {
+  valid_token "$target" || die "invalid command '$target'"
+  base=${target##*/}
+  valid_name "$base" || die "invalid command name '$base'"
+  out="$bin_dir/$base"
+  if [ -e "$out" ] && ! grep -qxF "$BIN_MARK $name" "$out" 2>/dev/null; then
+    die "$out exists and was not created by litterbox-export (try --export-path)"
+  fi
+  mkdir -p "$bin_dir"
+  tmp=$(mktemp "$bin_dir/.litterbox-export.XXXXXX")
+  trap 'rm -f "$tmp"' EXIT
+  w=''
+  if [ -n "$wrap" ]; then w=" $wrap"; fi
+  {
+    echo '#!/bin/sh'
+    echo "$BIN_MARK $name"
+    echo "# Generated by litterbox-export. Remove with: litterbox-export $name --bin $target --delete"
+    echo 'if [ -t 0 ]; then'
+    echo "  exec '$LITTERBOX' enter '$name' --tty true --interactive true --$w $target \"\$@\""
+    echo 'fi'
+    echo "exec '$LITTERBOX' enter '$name' --$w $target \"\$@\""
+  } > "$tmp"
+  chmod 755 "$tmp"
+  mv "$tmp" "$out"
+  trap - EXIT
+  echo "Exported '$target' from '$name': $out"
+}
+
+delete_bin() {
+  valid_token "$target" || die "invalid command '$target'"
+  out="$bin_dir/${target##*/}"
+  if [ ! -f "$out" ] || ! grep -qxF "$BIN_MARK $name" "$out"; then
+    die "$out was not exported from '$name'"
+  fi
+  rm -f "$out"
+  echo "Removed $out"
+}
+
+# --- list ----------------------------------------------------------------------------------------
+list_exports() {
+  found=0
+  for f in "$APP_DIR"/litterbox-"$name"-*.desktop; do
+    if [ -f "$f" ] && grep -qxF "$MARK=$name" "$f"; then
+      printf 'app  %-30s %s\n' "$(de_get Name < "$f")" "$f"
+      found=1
+    fi
+  done
+  for f in "$bin_dir"/*; do
+    if [ -f "$f" ] && grep -qxF "$BIN_MARK $name" "$f" 2>/dev/null; then
+      printf 'bin  %-30s %s\n' "$(basename "$f")" "$f"
+      found=1
+    fi
+  done
+  if [ "$found" = 0 ]; then echo "Nothing exported from '$name'"; fi
+}
+
+case "$mode:$delete" in
+  app:0) export_app ;;
+  app:1) delete_app ;;
+  bin:0) export_bin ;;
+  bin:1) delete_bin ;;
+  list:0) list_exports ;;
+  list:1) die "--delete needs --app or --bin" ;;
+esac

@@ -1,0 +1,152 @@
+#!/bin/sh
+# litterbox-addon - add helper scripts (and the packages they need) to a Litterbox definition
+#
+# Addons live in $ADDON_DIR/<addon>/. Every executable file in an addon directory is baked into
+# the image as /usr/local/bin/<file>, and packages.arch lists the packages it needs. Everything is
+# written into one marker-delimited block of ~/Litterbox/definitions/<name>.Dockerfile, so a
+# rebuild reproduces it and `remove` takes it out again.
+set -eu
+
+ADDON_DIR="${LITTERBOX_ADDONS_DIR:-/usr/share/litterbox-sandbox-addons}"
+LBX_ROOT="${LITTERBOX_ROOT:-${HOME:?HOME is not set}/Litterbox}"
+BEGIN='# >>> litterbox-addons >>>'
+END='# <<< litterbox-addons <<<'
+TAG='LBX_ADDON_EOF'
+
+die() { echo "litterbox-addon: $*" >&2; exit 1; }
+
+usage() {
+  cat <<EOF
+Usage: litterbox-addon <command>
+
+  list                           Show the available addons
+  install <name> [addon...]      Add addons (default: all) to the Litterbox called <name>
+  remove  <name>                 Take the addons out of the Litterbox called <name>
+
+After install or remove, rebuild the Litterbox to apply the change: litterbox build <name>
+Only Arch/CachyOS based definitions are supported.
+EOF
+}
+
+list_addons() {
+  for d in "$ADDON_DIR"/*/; do
+    if [ -d "$d" ]; then basename "$d"; fi
+  done
+}
+
+definition_path() {
+  case "$1" in
+    ''|*[!A-Za-z0-9._-]*|.*) die "invalid Litterbox name '$1'" ;;
+  esac
+  printf '%s/definitions/%s.Dockerfile\n' "$LBX_ROOT" "$1"
+}
+
+base_image() {
+  awk 'toupper($1) == "FROM" { for (i = 2; i <= NF; i++) if ($i !~ /^--/) { print $i; exit } }' "$1"
+}
+
+strip_block() {
+  awk -v b="$BEGIN" -v e="$END" '$0 == b { skip = 1; next } $0 == e { skip = 0; next } !skip' "$1"
+}
+
+addon_packages() {
+  [ -f "$ADDON_DIR/$1/packages.arch" ] || return 0
+  sed 's/#.*//' "$ADDON_DIR/$1/packages.arch" | tr -s ' \t' '\n' | sed '/^$/d'
+}
+
+emit_block() {
+  echo "$BEGIN"
+  echo "# Managed by litterbox-addon. Edits between these markers are overwritten."
+  echo "# Addons: $*"
+
+  pkgs=$(for a in "$@"; do addon_packages "$a"; done | sort -u)
+  if printf '%s\n' "$pkgs" | grep -q '[^A-Za-z0-9@._+-]'; then
+    die "unexpected characters in a packages.arch file"
+  fi
+  if [ -n "$pkgs" ]; then
+    echo "RUN pacman -S --noconfirm --needed $(printf '%s' "$pkgs" | tr '\n' ' ')"
+  fi
+
+  for a in "$@"; do
+    for f in "$ADDON_DIR/$a"/*; do
+      if [ ! -f "$f" ] || [ ! -x "$f" ]; then continue; fi
+      n=$(basename "$f")
+      if grep -qx -e 'EOF' -e "$TAG" "$f"; then
+        die "$a/$n contains a line that would end the embedded heredoc early"
+      fi
+      echo "RUN <<'EOF'"
+      echo "cat <<'$TAG' > /usr/local/bin/$n"
+      cat "$f"
+      [ -z "$(tail -c1 "$f")" ] || echo
+      echo "$TAG"
+      echo "chmod 755 /usr/local/bin/$n"
+      echo "EOF"
+    done
+  done
+  echo "$END"
+}
+
+cmd_install() {
+  [ $# -ge 1 ] || die "install needs a Litterbox name"
+  name=$1; shift
+  def=$(definition_path "$name")
+  [ -f "$def" ] || die "$def not found. Create it first with: litterbox define $name"
+
+  base=$(base_image "$def")
+  case "$base" in
+    *cachyos*|*archlinux*|*/arch:*|arch:*) ;;
+    *) die "$def is based on '${base:-?}'. Only Arch/CachyOS images are supported." ;;
+  esac
+
+  if [ $# -eq 0 ]; then
+    for d in "$ADDON_DIR"/*/; do
+      if [ -d "$d" ]; then set -- "$@" "$(basename "$d")"; fi
+    done
+  fi
+  [ $# -gt 0 ] || die "no addons found in $ADDON_DIR"
+  for a in "$@"; do
+    [ -d "$ADDON_DIR/$a" ] || die "unknown addon '$a' (see: litterbox-addon list)"
+  done
+
+  tmp=$(mktemp "$def.XXXXXX")
+  trap 'rm -f "$tmp"' EXIT
+  strip_block "$def" > "$tmp"
+  [ -z "$(tail -c1 "$tmp")" ] || echo >> "$tmp"
+  emit_block "$@" >> "$tmp"
+  chmod --reference="$def" "$tmp"
+  mv "$tmp" "$def"
+  trap - EXIT
+
+  echo "Added to $def: $*"
+  echo "Rebuild to apply: litterbox build $name"
+}
+
+cmd_remove() {
+  [ $# -eq 1 ] || die "remove needs a Litterbox name"
+  def=$(definition_path "$1")
+  [ -f "$def" ] || die "$def not found"
+  if ! grep -qxF "$BEGIN" "$def"; then
+    echo "No addons installed in $def"
+    return 0
+  fi
+
+  tmp=$(mktemp "$def.XXXXXX")
+  trap 'rm -f "$tmp"' EXIT
+  strip_block "$def" > "$tmp"
+  chmod --reference="$def" "$tmp"
+  mv "$tmp" "$def"
+  trap - EXIT
+
+  echo "Removed addons from $def"
+  echo "Rebuild to apply: litterbox build $1"
+}
+
+[ $# -ge 1 ] || { usage >&2; exit 1; }
+cmd=$1; shift
+case "$cmd" in
+  list) list_addons ;;
+  install) cmd_install "$@" ;;
+  remove) cmd_remove "$@" ;;
+  -h|--help|help) usage ;;
+  *) usage >&2; exit 1 ;;
+esac

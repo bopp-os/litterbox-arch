@@ -1,0 +1,56 @@
+# Maintainer: BoppOS Team
+pkgname=litterbox-sandbox
+pkgver=0.6.5
+pkgrel=1
+pkgdesc="Somewhat isolated Podman development environments with a confirm-before-sign SSH agent"
+arch=('x86_64')
+url="https://litterbox.work"
+license=('Apache-2.0')
+depends=('coreutils' 'gcc-libs' 'glibc' 'podman')
+makedepends=('rust' 'rust-musl')
+# The SSH confirmation pop-up (egui) dlopen()s these at runtime, so they are not linked
+optdepends=(
+  'sudo: device passthrough (litterbox device)'
+  'wayland: SSH confirmation pop-up on Wayland'
+  'libxkbcommon: pop-up keyboard input'
+  'libx11: SSH confirmation pop-up on X11'
+  'libxcb: SSH confirmation pop-up on X11'
+  'libxcursor: SSH confirmation pop-up on X11'
+  'libxi: SSH confirmation pop-up on X11'
+  'libxkbcommon-x11: pop-up keyboard input on X11'
+  'libglvnd: pop-up rendering via EGL'
+  'vulkan-icd-loader: pop-up rendering via Vulkan'
+)
+conflicts=('litterbox')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/Gerharddc/litterbox/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('529ce2c0b9ce1fe617b1b36d343118b095a19cc242f997ab4d9fc924f086cd4b')
+
+_musl=x86_64-unknown-linux-musl
+
+prepare() {
+  cd "Litterbox-$pkgver"
+  local host; host="$(rustc -vV | sed -n 's/host: //p')"
+  (cd litterbox && cargo fetch --locked --target "$host")
+  (cd lbx-init  && cargo fetch --locked --target "$_musl")
+}
+
+build() {
+  cd "Litterbox-$pkgver"
+  (cd litterbox && cargo build --frozen --release)
+  # lbx-init is bind-mounted into arbitrary container images, so it must be static
+  (cd lbx-init  && cargo build --frozen --release --target "$_musl")
+}
+
+check() {
+  cd "Litterbox-$pkgver"
+  (cd litterbox && cargo test --frozen)
+  (cd lbx-init  && cargo test --frozen --target "$_musl")
+}
+
+package() {
+  cd "Litterbox-$pkgver"
+  # litterbox locates lbx-init next to its own executable, so both go in /usr/bin
+  install -Dm755 litterbox/target/release/litterbox "$pkgdir/usr/bin/litterbox"
+  install -Dm755 "lbx-init/target/$_musl/release/lbx-init" "$pkgdir/usr/bin/lbx-init"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

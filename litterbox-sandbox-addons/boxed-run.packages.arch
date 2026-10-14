@@ -1,0 +1,8 @@
+# Packages boxed-run needs inside an Arch/CachyOS Litterbox image
+dbus
+gnome-keyring
+gnome-themes-extra
+glib2
+gsettings-desktop-schemas
+libsecret
+util-linux

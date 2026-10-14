@@ -1,0 +1,31 @@
+# Maintainer: BoppOS Team
+pkgname=litterbox-sandbox-addons
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Helper scripts for Litterbox sandboxes (keyring and D-Bus for IDEs), a tool to install them and one to export apps to the host"
+arch=('any')
+url="https://github.com/bopp-os/pkgbuilds"
+license=('GPL-3.0-or-later')
+depends=('litterbox-sandbox' 'coreutils' 'findutils' 'gawk' 'grep' 'sed' 'tar')
+optdepends=('xdg-utils: make exported apps the default handler for URL schemes (litterbox-export --url-handler)')
+source=(litterbox-addon
+        litterbox-export
+        boxed-run
+        boxed-run.packages.arch)
+sha256sums=('3762b09865bfc4f721bac1bc3952a632506dd3027e1499da239c09a438d5fda8'
+            'ca2085bae0d936409a5c6f3f20c63d026ab7cb78b500d9d65fd84270fcdff558'
+            'f0e6eb1653ce29c9888818bba85b434f44c3b39654defd84393fcd994172780e'
+            'aa453c43f699e488135b8eb798c0a0179515c1445d2e5611a3e5117a16bd10f2')
+
+package() {
+  local addons="$pkgdir/usr/share/litterbox-sandbox-addons"
+
+  # Host side tools
+  install -Dm755 litterbox-addon "$pkgdir/usr/bin/litterbox-addon"
+  install -Dm755 litterbox-export "$pkgdir/usr/bin/litterbox-export"
+
+  # Each addon is a directory: executable files get baked into the image as
+  # /usr/local/bin/<name>, packages.arch lists the packages they need.
+  install -Dm755 boxed-run "$addons/boxed-run/boxed-run"
+  install -Dm644 boxed-run.packages.arch "$addons/boxed-run/packages.arch"
+}

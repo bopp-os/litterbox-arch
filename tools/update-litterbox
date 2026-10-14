@@ -1,0 +1,141 @@
+#!/bin/sh
+# update-litterbox - check for, and apply, a new upstream Litterbox release.
+#
+#   update-litterbox --current        print the version packaged in litterbox-sandbox/PKGBUILD
+#   update-litterbox --latest         print the newest upstream release (no drafts, no prereleases)
+#   update-litterbox --check          exit 0 if upstream is newer, 10 if we are up to date
+#   update-litterbox [VERSION]        rewrite litterbox-sandbox/PKGBUILD and locks/ for VERSION
+#                                     (default: latest; an explicit VERSION may also be older or equal)
+#
+# It changes exactly three PKGBUILD lines (pkgver, pkgrel, sha256sums) and copies upstream's three
+# Cargo.lock files into locks/. Anything else in the working tree makes it refuse, so a run can never
+# sneak an unrelated change into the update.
+#
+# Test overrides: LBX_ROOT, LITTERBOX_API_URL, LITTERBOX_TARBALL_URL_BASE.
+set -eu
+
+ROOT="${LBX_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+PKGBUILD="$ROOT/litterbox-sandbox/PKGBUILD"
+LOCKS="$ROOT/locks"
+UPSTREAM=Gerharddc/litterbox
+API_URL="${LITTERBOX_API_URL:-https://api.github.com/repos/$UPSTREAM/releases/latest}"
+TARBALL_BASE="${LITTERBOX_TARBALL_URL_BASE:-https://github.com/$UPSTREAM/archive/refs/tags}"
+CRATES="litterbox lbx-init shared"
+
+die() { echo "update-litterbox: $*" >&2; exit 1; }
+
+valid_version() {
+  printf '%s\n' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'
+}
+
+current_version() {
+  v=$(sed -n 's/^pkgver=//p' "$PKGBUILD" | head -n 1 | tr -d "\"'")
+  valid_version "$v" || die "cannot read a x.y.z pkgver from $PKGBUILD (got '$v')"
+  printf '%s\n' "$v"
+}
+
+latest_version() {
+  # The token only ever goes to api.github.com, never to a test override.
+  if [ -n "${GITHUB_TOKEN:-}" ] && [ -z "${LITTERBOX_API_URL:-}" ]; then
+    body=$(curl -fsSL -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GITHUB_TOKEN" "$API_URL") || die "could not fetch $API_URL"
+  else
+    body=$(curl -fsSL -H 'Accept: application/vnd.github+json' "$API_URL") || die "could not fetch $API_URL"
+  fi
+  tag=$(printf '%s\n' "$body" | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n 1 | sed 's/.*"\([^"]*\)"$/\1/')
+  tag=${tag#v}
+  valid_version "$tag" || die "latest release tag '$tag' is not a plain x.y.z version"
+  printf '%s\n' "$tag"
+}
+
+# version_gt A B: true if A is a newer version than B
+version_gt() {
+  [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n 1)" = "$1" ]
+}
+
+require_clean_tree() {
+  if git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    if [ -n "$(git -C "$ROOT" status --porcelain)" ]; then
+      die "working tree is not clean; commit or stash first"
+    fi
+  fi
+}
+
+check_only_expected_changes() {
+  git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1 || return 0
+  git -C "$ROOT" status --porcelain | while IFS= read -r line; do
+    path=${line#???}
+    case $path in
+      litterbox-sandbox/PKGBUILD|locks/*) ;;
+      *) echo "update-litterbox: unexpected change outside PKGBUILD/locks: $path" >&2; exit 1 ;;
+    esac
+  done
+}
+
+apply() {
+  version=$1; explicit=$2
+  valid_version "$version" || die "invalid version '$version' (want x.y.z)"
+  cur=$(current_version)
+
+  if [ "$version" = "$cur" ]; then
+    if [ "$explicit" = 1 ]; then
+      echo "Already at $cur; nothing to change."
+      return 0
+    fi
+    echo "Up to date ($cur)."
+    return 10
+  fi
+  if [ "$explicit" = 0 ] && ! version_gt "$version" "$cur"; then
+    echo "Up to date ($cur); latest is $version."
+    return 10
+  fi
+
+  require_clean_tree
+
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  curl -fsSL "$TARBALL_BASE/v$version.tar.gz" -o "$tmp/src.tar.gz" || die "could not download $TARBALL_BASE/v$version.tar.gz"
+
+  top=$(tar -tzf "$tmp/src.tar.gz" | head -n 1)
+  [ "$top" = "Litterbox-$version/" ] || die "tarball top-level directory is '$top', expected 'Litterbox-$version/' (the PKGBUILD depends on it)"
+  for c in $CRATES; do
+    tar -tzf "$tmp/src.tar.gz" "Litterbox-$version/$c/Cargo.lock" >/dev/null 2>&1 \
+      || die "upstream $version has no $c/Cargo.lock; its layout changed, review by hand"
+  done
+  sum=$(sha256sum "$tmp/src.tar.gz" | cut -d' ' -f1)
+
+  # The PKGBUILD must still have exactly one of each line we rewrite.
+  for key in pkgver pkgrel sha256sums; do
+    n=$(grep -c "^$key=" "$PKGBUILD" || true)
+    [ "$n" = 1 ] || die "expected exactly one '$key=' line in $PKGBUILD, found $n; layout changed, review by hand"
+  done
+  sed -e "s/^pkgver=.*/pkgver=$version/" \
+      -e "s/^pkgrel=.*/pkgrel=1/" \
+      -e "s/^sha256sums=.*/sha256sums=('$sum')/" "$PKGBUILD" > "$tmp/PKGBUILD.new"
+  cat "$tmp/PKGBUILD.new" > "$PKGBUILD"
+
+  for c in $CRATES; do
+    mkdir -p "$LOCKS/$c"
+    tar -xzOf "$tmp/src.tar.gz" "Litterbox-$version/$c/Cargo.lock" > "$LOCKS/$c/Cargo.lock"
+  done
+
+  # Re-read what we wrote.
+  [ "$(current_version)" = "$version" ] || die "verification failed: pkgver"
+  grep -qx "sha256sums=('$sum')" "$PKGBUILD" || die "verification failed: sha256sums"
+  check_only_expected_changes
+
+  echo "Updated litterbox-sandbox: $cur -> $version"
+  echo "sha256 $sum"
+}
+
+case "${1:-}" in
+  --current) current_version ;;
+  --latest) latest_version ;;
+  --check)
+    cur=$(current_version); lat=$(latest_version)
+    echo "current=$cur latest=$lat"
+    if version_gt "$lat" "$cur"; then exit 0; else exit 10; fi ;;
+  -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//' ;;
+  --*) die "unknown option '$1'" ;;
+  '') apply "$(latest_version)" 0 ;;
+  *) apply "$1" 1 ;;
+esac

@@ -1,0 +1,166 @@
+#!/bin/sh
+# publish-update - turn a verified Litterbox update into a pull request, and merge it when it is clean.
+#
+# Runs in the workflow's publish job: that job has write access but never executes upstream code
+# (the build ran in the unprivileged verify job). Everything is re-derived here with our own tools
+# instead of trusting files from the verify job; only its pass/fail outcomes and log tails are used.
+#
+# Environment (all set by the workflow):
+#   CURRENT, TARGET     versions (x.y.z)
+#   V_SCAN              exit status of tools/scan-release in the verify job (0 clean, 20 hold, 1 error)
+#   V_TESTS, V_BUILD    outcome of the test and build steps ("success" or anything else = failed)
+#   GH_TOKEN            consumed by gh and git
+#   RUN_URL             link to the workflow run (optional)
+#   REPORT_DIR          directory with build-tail.txt / namcap.txt from the verify job (optional)
+#   BASE_BRANCH         default main
+#
+# Outcomes: clean -> PR opened/updated and squash-merged; held -> PR left open, label needs-review;
+# any failed check or scan error -> no PR, an Issue instead. Nothing is ever pushed to the base branch.
+set -eu
+
+ROOT="${LBX_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+BASE="${BASE_BRANCH:-main}"
+BRANCH=upstream-update/litterbox-sandbox
+REPORTS="${REPORT_DIR:-}"
+UPSTREAM_RELEASES=https://github.com/Gerharddc/litterbox/releases/tag
+
+die() { echo "publish-update: $*" >&2; exit 1; }
+ver_ok() { printf '%s\n' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; }
+indent() { sed 's/^/    /'; }   # anything from upstream goes into an indented code block: no mentions, no markup, no breaking out
+
+: "${CURRENT:?CURRENT is required}" "${TARGET:?TARGET is required}"
+ver_ok "$CURRENT" || die "bad CURRENT '$CURRENT'"
+ver_ok "$TARGET" || die "bad TARGET '$TARGET'"
+V_SCAN="${V_SCAN:-1}"; V_TESTS="${V_TESTS:-failure}"; V_BUILD="${V_BUILD:-failure}"
+case $V_SCAN in 0|20|1) ;; *) V_SCAN=1 ;; esac
+run_link=''
+case "${RUN_URL:-}" in https://github.com/*) run_link=$RUN_URL ;; esac
+
+if [ "$TARGET" = "$CURRENT" ]; then echo "Nothing to publish: already at $CURRENT."; exit 0; fi
+
+cd "$ROOT"
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+make_labels() {
+  gh label create upstream-update --color 1d76db --description "Updates from upstream Litterbox" --force >/dev/null 2>&1 || true
+  gh label create needs-review --color d93f0b --description "Held back by the release gate: a human decides" --force >/dev/null 2>&1 || true
+  gh label create breaking-per-upstream --color b60205 --description "Upstream treats this version bump as breaking" --force >/dev/null 2>&1 || true
+}
+
+# --- authoritative gate run (not the verify job's word for it) ----------------------------------------
+gate_rc=0
+sh "$ROOT/tools/scan-release" "$TARGET" --report "$tmp/gate.md" > "$tmp/gate.out" 2>&1 || gate_rc=$?
+case $gate_rc in 0|20|1) ;; *) gate_rc=1 ;; esac
+
+tail_of() { # tail_of FILE N: last N lines of FILE, or a note if it is missing
+  if [ -n "$1" ] && [ -f "$1" ]; then tail -n "$2" "$1"; else echo "(not available)"; fi
+}
+
+# --- failure path: an Issue, never a PR -----------------------------------------------------------------
+if [ "$gate_rc" = 1 ] || [ "$V_SCAN" = 1 ] || [ "$V_TESTS" != success ] || [ "$V_BUILD" != success ]; then
+  title="Litterbox $TARGET failed the update checks"
+  {
+    echo "Upstream released Litterbox $TARGET (shipped: $CURRENT). The automated update did **not** open a pull request."
+    echo
+    echo "| Check | Result |"
+    echo "|---|---|"
+    echo "| Release gate (verify job) | $([ "$V_SCAN" = 1 ] && echo error || echo ok) |"
+    echo "| Release gate (publish job) | $([ "$gate_rc" = 1 ] && echo error || echo ok) |"
+    echo "| Repository tests | $V_TESTS |"
+    echo "| Test build on Arch | $V_BUILD |"
+    echo
+    [ -z "$run_link" ] || echo "Run: $run_link"
+    echo
+    echo "Gate output (last lines):"
+    echo
+    tail -n 30 "$tmp/gate.out" | indent
+    echo
+    echo "Build log (last lines):"
+    echo
+    tail_of "${REPORTS:+$REPORTS/build-tail.txt}" 40 | indent
+  } > "$tmp/issue.md"
+  make_labels
+  existing=$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number // empty' 2>/dev/null || true)
+  if [ -n "$existing" ]; then
+    gh issue comment "$existing" --body-file "$tmp/issue.md"
+  else
+    gh issue create --title "$title" --body-file "$tmp/issue.md" --label upstream-update
+  fi
+  echo "Checks failed; opened/updated an issue instead of a pull request."
+  exit 0
+fi
+
+# --- success path: branch, commit, push --------------------------------------------------------------------
+sh "$ROOT/tools/update-litterbox" "$TARGET"
+
+git config user.name "github-actions[bot]"
+git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+git checkout -q -B "$BRANCH"
+git add litterbox-sandbox/PKGBUILD locks
+unexpected=$(git diff --cached --name-only | grep -v -E '^(litterbox-sandbox/PKGBUILD|locks/(litterbox|lbx-init|shared)/Cargo\.lock)$' || true)
+[ -z "$unexpected" ] || die "refusing to commit unexpected paths: $unexpected"
+[ -z "$(git status --porcelain | grep -v -E '^[MADR] ' || true)" ] || die "working tree has changes outside the staged update"
+git commit -q -m "upstream(litterbox-sandbox): update to $TARGET" -m "Bump from $CURRENT. Release: $UPSTREAM_RELEASES/v$TARGET"
+# Credentials come from GH_TOKEN via gh; the checkout does not persist any.
+gh auth setup-git >/dev/null 2>&1 || true
+git push --force origin "$BRANCH"
+
+# --- pull request ------------------------------------------------------------------------------------------------
+breaking=0
+[ "${CURRENT%.*}" = "${TARGET%.*}" ] || breaking=1
+notes=$(gh api "repos/Gerharddc/litterbox/releases/tags/v$TARGET" --jq .body 2>/dev/null | head -c 3000 | tr -d '\r' || true)
+{
+  echo "Automated update of \`litterbox-sandbox\` from $CURRENT to **$TARGET**."
+  echo
+  echo "Upstream release: $UPSTREAM_RELEASES/v$TARGET"
+  [ -z "$run_link" ] || echo "Workflow run: $run_link"
+  echo
+  if [ "$breaking" = 1 ]; then
+    echo "> **Breaking per upstream.** Litterbox is pre-1.0 and treats a change in the middle number as breaking."
+    echo "> Existing Litterbox definitions may need changes and a rebuild (\`litterbox build <name>\`)."
+    echo
+  fi
+  echo "### Upstream release notes (verbatim, shown as a code block)"
+  echo
+  if [ -n "$notes" ]; then printf '%s\n' "$notes" | indent; else echo "    (none published)"; fi
+  echo
+  cat "$tmp/gate.md"
+  echo
+  echo "### Test build (Arch container, unprivileged user)"
+  echo
+  echo "- Repository tests: $V_TESTS"
+  echo "- \`makepkg\` including upstream's \`cargo test\`: $V_BUILD"
+  if [ -n "$REPORTS" ] && [ -f "$REPORTS/namcap.txt" ]; then
+    echo
+    echo "namcap (informational):"
+    echo
+    head -n 40 "$REPORTS/namcap.txt" | indent
+  fi
+} > "$tmp/pr.md"
+
+make_labels
+title="upstream(litterbox-sandbox): update to $TARGET"
+n=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty' 2>/dev/null || true)
+if [ -n "$n" ]; then
+  gh pr edit "$n" --title "$title" --body-file "$tmp/pr.md"
+  echo "Updated pull request #$n."
+else
+  gh pr create --base "$BASE" --head "$BRANCH" --title "$title" --body-file "$tmp/pr.md" --label upstream-update
+  n=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty' 2>/dev/null || true)
+fi
+[ -n "$n" ] || die "could not determine the pull request number"
+[ "$breaking" = 0 ] || gh pr edit "$n" --add-label breaking-per-upstream
+
+if [ "$gate_rc" = 20 ]; then
+  gh pr edit "$n" --add-label needs-review
+  echo "Release gate flagged this update; pull request #$n is left open for a human."
+  exit 0
+fi
+
+if gh pr merge "$n" --squash --delete-branch; then
+  echo "Merged pull request #$n."
+else
+  gh pr edit "$n" --add-label needs-review || true
+  echo "::warning::Could not merge pull request #$n automatically; it is left open."
+fi

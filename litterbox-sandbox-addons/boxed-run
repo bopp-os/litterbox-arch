@@ -1,0 +1,47 @@
+#!/bin/sh
+if [ "$#" -eq 0 ]; then echo "Usage: boxed-run <command> [args...]" >&2; exit 1; fi
+
+# Codium freezes without a controlling terminal, so re-exec under a pty
+if [ ! -t 0 ]; then
+  cmd="boxed-run"
+  for a in "$@"; do
+    esc=$(printf '%s' "$a" | sed "s/'/'\\\\''/g")
+    cmd="$cmd '$esc'"
+  done
+  exec script -qec "$cmd" /dev/null
+fi
+
+export GTK_THEME="Adwaita:dark"
+export GTK_USE_PORTAL=0
+export NO_AT_BRIDGE=1
+
+# shellcheck disable=SC2016 # the single-quoted script is meant to expand in the inner shell
+exec dbus-run-session -- sh -c '
+  # Litterbox points SSH_AUTH_SOCK at its confirm-before-sign agent. Remember it so
+  # gnome-keyring-daemon cannot replace it with its own agent socket.
+  lbx_ssh_auth_sock="${SSH_AUTH_SOCK:-}"
+
+  # 1. Pre-configure the default keyring alias to point to "login"
+  mkdir -p "$HOME/.local/share/keyrings"
+  if [ ! -f "$HOME/.local/share/keyrings/default" ]; then
+    echo "login" > "$HOME/.local/share/keyrings/default"
+  fi
+
+  # 2. Unlock/initialize login keyring with empty password via STDIN
+  eval $(printf "\n" | gnome-keyring-daemon --daemonize --login 2>/dev/null)
+
+  # 3. Register Secret Service components on the D-Bus session
+  eval $(gnome-keyring-daemon --start --components=secrets 2>/dev/null)
+
+  if [ -n "$lbx_ssh_auth_sock" ]; then
+    export SSH_AUTH_SOCK="$lbx_ssh_auth_sock"
+  else
+    unset SSH_AUTH_SOCK
+  fi
+
+  # 4. Background theme configuration
+  gsettings set org.gnome.desktop.interface color-scheme "prefer-dark" >/dev/null 2>&1 &
+  gsettings set org.gnome.desktop.interface gtk-theme "Adwaita-dark" >/dev/null 2>&1 &
+
+  exec "$@"
+' sh "$@"

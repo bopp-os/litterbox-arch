@@ -1,0 +1,234 @@
+name: Upstream Litterbox
+
+# Watches Gerharddc/litterbox for new releases. A new release is scanned (tools/scan-release), packaged
+# (tools/update-litterbox), tested and test-built on Arch. A clean update is opened as a pull request and
+# merged by the publish job; anything flagged is left open for a human. See README.md.
+#
+# Two jobs on purpose:
+#   verify   runs upstream's code (cargo build scripts and tests), so it only gets a read-only token and
+#            an unprivileged user without sudo.
+#   publish  holds the write token but never runs upstream code: it re-derives the update with our own
+#            tools and only trusts pass/fail outcomes from verify.
+
+on:
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Litterbox version to package, x.y.z (empty = latest upstream release)'
+        required: false
+        default: ''
+      dry_run:
+        description: 'Scan, test and build only: open no PR, merge nothing'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: upstream-litterbox
+  cancel-in-progress: false
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  verify:
+    name: Scan, test and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    container: archlinux:latest
+    permissions:
+      contents: read
+    outputs:
+      action: ${{ steps.decide.outputs.action }}
+      current: ${{ steps.decide.outputs.current }}
+      target: ${{ steps.decide.outputs.target }}
+      scan_rc: ${{ steps.scan.outputs.rc }}
+      tests: ${{ steps.tests.outcome }}
+      build: ${{ steps.build.outcome }}
+    steps:
+      - name: Install tools
+        run: pacman -Syu --noconfirm --needed base-devel git jq osv-scanner namcap shellcheck
+
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Mark workspace safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Decide what to do
+        id: decide
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -eu
+          current=$(sh tools/update-litterbox --current)
+          if [ -n "$INPUT_VERSION" ]; then
+            target=$INPUT_VERSION
+            action=update
+          else
+            target=$(sh tools/update-litterbox --latest)
+            rc=0
+            sh tools/update-litterbox --check >/dev/null || rc=$?
+            case $rc in
+              0) action=update ;;
+              10) action=none ;;
+              *) echo "update check failed (exit $rc)"; exit 1 ;;
+            esac
+          fi
+          if [ "$action" = none ] && [ "$DRY_RUN" = true ]; then
+            target=$current
+            action=update
+          fi
+          printf '%s\n' "$target" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'
+          echo "current=$current target=$target action=$action"
+          {
+            echo "current=$current"
+            echo "target=$target"
+            echo "action=$action"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$action" = none ]; then
+            echo "Litterbox $current is the latest upstream release; nothing to do." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Release gate (dependency scan)
+        id: scan
+        if: steps.decide.outputs.action == 'update'
+        env:
+          TARGET: ${{ steps.decide.outputs.target }}
+        run: |
+          rc=0
+          sh tools/scan-release "$TARGET" --report "$RUNNER_TEMP/gate.md" || rc=$?
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          if [ -f "$RUNNER_TEMP/gate.md" ]; then cat "$RUNNER_TEMP/gate.md" >> "$GITHUB_STEP_SUMMARY"; fi
+          # 0 = clean, 20 = hold (the publish job leaves the PR open), 1 = error (checked at the end)
+          exit 0
+
+      - name: Apply the update to PKGBUILD and locks/
+        id: apply
+        if: steps.decide.outputs.action == 'update' && steps.scan.outputs.rc != '1'
+        env:
+          TARGET: ${{ steps.decide.outputs.target }}
+        run: sh tools/update-litterbox "$TARGET"
+
+      - name: Repository tests
+        id: tests
+        if: steps.apply.outcome == 'success'
+        continue-on-error: true
+        run: sh tests/run.sh
+
+      - name: Install the package's dependencies
+        id: deps
+        if: steps.apply.outcome == 'success'
+        run: |
+          set -eu
+          cd litterbox-sandbox
+          mapfile -t pkgs < <(bash -c 'source ./PKGBUILD; printf "%s\n" "${depends[@]}" "${makedepends[@]}"' | sed 's/[<>=].*//' | sort -u)
+          # Installed as root up front so the build below needs no sudo at all.
+          pacman -S --noconfirm --needed "${pkgs[@]}"
+
+      - name: Build the package (unprivileged user, no sudo)
+        id: build
+        if: steps.deps.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set -eu
+          useradd -m builder
+          install -d -o builder -g builder /home/builder/build
+          cp -r litterbox-sandbox/. /home/builder/build/
+          chown -R builder:builder /home/builder/build
+          rc=0
+          runuser -l builder -c 'cd /home/builder/build && makepkg --noconfirm --noprogressbar' > "$RUNNER_TEMP/build.log" 2>&1 || rc=$?
+          tail -n 60 "$RUNNER_TEMP/build.log"
+          exit $rc
+
+      - name: namcap (informational)
+        if: steps.build.outcome == 'success'
+        run: |
+          cd /home/builder/build
+          { namcap PKGBUILD; for p in ./*.pkg.tar.zst; do namcap "$p"; done; } > "$RUNNER_TEMP/namcap.txt" 2>&1 || true
+          ls -l ./*.pkg.tar.zst
+          {
+            echo '### namcap (informational)'
+            echo
+            sed 's/^/    /' "$RUNNER_TEMP/namcap.txt"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Collect reports for the publish job
+        if: always() && steps.decide.outputs.action == 'update'
+        run: |
+          mkdir -p "$RUNNER_TEMP/reports"
+          if [ -f "$RUNNER_TEMP/namcap.txt" ]; then cp "$RUNNER_TEMP/namcap.txt" "$RUNNER_TEMP/reports/"; fi
+          if [ -f "$RUNNER_TEMP/build.log" ]; then tail -n 80 "$RUNNER_TEMP/build.log" > "$RUNNER_TEMP/reports/build-tail.txt"; fi
+          echo "reports" > "$RUNNER_TEMP/reports/.keep"
+
+      - uses: actions/upload-artifact@v7
+        if: always() && steps.decide.outputs.action == 'update'
+        with:
+          name: reports
+          path: ${{ runner.temp }}/reports
+          include-hidden-files: true
+          retention-days: 7
+
+      - name: Fail the run if any check failed
+        if: always() && steps.decide.outputs.action == 'update'
+        env:
+          SCAN_RC: ${{ steps.scan.outputs.rc }}
+          APPLY: ${{ steps.apply.outcome }}
+          TESTS: ${{ steps.tests.outcome }}
+          DEPS: ${{ steps.deps.outcome }}
+          BUILD: ${{ steps.build.outcome }}
+        run: |
+          echo "scan_rc=$SCAN_RC apply=$APPLY tests=$TESTS deps=$DEPS build=$BUILD"
+          if [ "$SCAN_RC" != 1 ] && [ "$APPLY" = success ] && [ "$TESTS" = success ] && [ "$DEPS" = success ] && [ "$BUILD" = success ]; then
+            exit 0
+          fi
+          exit 1
+
+  publish:
+    name: Open a PR (merge when clean)
+    needs: verify
+    if: ${{ always() && needs.verify.outputs.action == 'update' && inputs.dry_run != true && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container: archlinux:latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Install tools
+        run: pacman -Syu --noconfirm --needed git github-cli jq osv-scanner
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Mark workspace safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          name: reports
+          path: ${{ runner.temp }}/reports
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CURRENT: ${{ needs.verify.outputs.current }}
+          TARGET: ${{ needs.verify.outputs.target }}
+          V_SCAN: ${{ needs.verify.outputs.scan_rc }}
+          V_TESTS: ${{ needs.verify.outputs.tests }}
+          V_BUILD: ${{ needs.verify.outputs.build }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPORT_DIR: ${{ runner.temp }}/reports
+        run: sh tools/publish-update
