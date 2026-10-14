@@ -1,0 +1,197 @@
+#!/bin/sh
+# litterbox-update - update the packages inside a Litterbox, using whichever package manager it has.
+#
+# Runs on the HOST. For each Litterbox it runs `litterbox enter <name> --root -- ...` twice: once to look
+# at the container (os-release plus which package managers exist), once to run the update.
+#
+# The update command is always one of a few fixed strings chosen from the table below. Nothing the
+# container prints is ever pasted into a command: its os-release and tool list only decide WHICH fixed
+# command runs, and they are sanitised first.
+#
+# Quoting: Litterbox runs "$SHELL -l -c '<command> <args joined with single spaces>'" in the container with
+# no quoting, and that shell may be bash or fish. So each command is sent as ONE argument of the form
+# sh -c '<script>', and the scripts contain no single quotes and no backslashes.
+set -eu
+
+LBX_ROOT="${LITTERBOX_ROOT:-${HOME:?HOME is not set}/Litterbox}"
+
+die() { echo "litterbox-update: $*" >&2; exit 1; }
+
+usage() {
+  cat <<EOF
+Usage: litterbox-update [options] <name>...
+       litterbox-update [options] --all
+
+Updates the packages inside the named Litterbox(es) as root, picking the package manager from the
+container's os-release:
+
+  Arch family (arch, cachyos, endeavouros, manjaro, ...)   pacman -Syu --noconfirm
+  Debian family (debian, ubuntu, mint, ...)                 apt-get update && apt-get -y upgrade
+  Fedora family (fedora, rhel, rocky, alma, ...)            dnf -y upgrade --refresh (dnf5 if that is all there is)
+  openSUSE Tumbleweed / Slowroll                            zypper refresh && zypper dup
+  openSUSE Leap / SLES                                      zypper refresh && zypper up
+
+If the distribution is not recognised it falls back to whichever of those package managers it finds.
+
+Options:
+  -n, --dry-run     Look at the container and print what would run; change nothing
+      --no-sandbox  pacman only: add --disable-sandbox. Use it if pacman fails with sandbox or Landlock
+                    errors inside the container (needs pacman 7 or newer)
+      --all         Every Litterbox that has a definition in ~/Litterbox/definitions
+  -h, --help        This text
+
+Updates are made inside the running container. They survive restarts but are lost when the Litterbox is
+rebuilt or deleted (litterbox build / delete); put anything permanent in its Dockerfile.
+EOF
+}
+
+valid_name() {
+  case $1 in
+    ''|*[!A-Za-z0-9._-]*|.*) return 1 ;;
+  esac
+}
+
+# --- what the container tells us (fixed script: no single quotes, no backslashes) --------------------------------
+# shellcheck disable=SC2016 # $t must reach the container's shell unexpanded
+PROBE='grep -E "^(ID|ID_LIKE|VERSION_ID)=" /etc/os-release 2>/dev/null; for t in pacman apt-get dnf dnf5 zypper; do command -v $t >/dev/null 2>&1 && echo "have=$t"; done; pacman --help 2>&1 | grep -q -- --disable-sandbox && echo "pacman_disable_sandbox=1"; true'
+
+# clean VALUE: lowercase, strip quotes, keep only [a-z0-9._ -], at most 80 characters
+clean() { printf '%s' "$1" | tr -d '"'"'" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9._ -' | cut -c1-80; }
+
+# --- arguments ------------------------------------------------------------------------------------------------------
+dry_run=0; no_sandbox=0; all=0; names=''
+while [ $# -gt 0 ]; do
+  case $1 in
+    -n|--dry-run) dry_run=1 ;;
+    --no-sandbox) no_sandbox=1 ;;
+    --all) all=1 ;;
+    -h|--help) usage; exit 0 ;;
+    -*) die "unknown option '$1'" ;;
+    *) valid_name "$1" || die "invalid Litterbox name '$1'"; names="$names $1" ;;
+  esac
+  shift
+done
+
+if [ "$all" = 1 ]; then
+  [ -z "$names" ] || die "use either --all or names, not both"
+  for f in "$LBX_ROOT"/definitions/*.Dockerfile; do
+    if [ -f "$f" ]; then
+      n=$(basename "$f" .Dockerfile)
+      if valid_name "$n"; then names="$names $n"; fi
+    fi
+  done
+  [ -n "$names" ] || die "no Litterbox definitions found in $LBX_ROOT/definitions"
+fi
+[ -n "$names" ] || { usage >&2; exit 1; }
+
+LITTERBOX=$(command -v litterbox) || die "litterbox is not installed or not on PATH"
+
+# --- one Litterbox ------------------------------------------------------------------------------------------------------
+update_one() {
+  name=$1
+  probe_out=$("$LITTERBOX" enter "$name" --root -- "sh -c '$PROBE'") \
+    || { echo "litterbox-update: could not run a command in '$name' (is it built? try: litterbox build $name)" >&2; return 1; }
+  probe_out=$(printf '%s\n' "$probe_out" | tr -cd '[:print:]\n' | cut -c1-200)
+
+  os_id=''; os_like=''; os_ver=''; have=' '; can_nosandbox=0
+  while IFS= read -r line; do
+    case $line in
+      ID=*) os_id=$(clean "${line#ID=}") ;;
+      ID_LIKE=*) os_like=$(clean "${line#ID_LIKE=}") ;;
+      VERSION_ID=*) os_ver=$(clean "${line#VERSION_ID=}") ;;
+      have=pacman|have=apt-get|have=dnf|have=dnf5|have=zypper) have="$have${line#have=} " ;;
+      pacman_disable_sandbox=1) can_nosandbox=1 ;;
+    esac
+  done <<EOF
+$probe_out
+EOF
+
+  has() { case $have in *" $1 "*) return 0 ;; esac; return 1; }
+
+  # distribution family: the ID first, then the ID_LIKE list
+  family=''
+  set -f
+  for tok in $os_id $os_like; do
+    case $tok in
+      arch|cachyos|endeavouros|manjaro|garuda|artix|archarm) family=arch ;;
+      debian|ubuntu|linuxmint|pop|kali|raspbian|devuan) family=debian ;;
+      fedora|rhel|centos|rocky|almalinux|nobara|ol|amzn) family=fedora ;;
+      opensuse*|sles|sle*|suse) family=suse ;;
+    esac
+    if [ -n "$family" ]; then break; fi
+  done
+  set +f
+
+  tool=''; how=''
+  case $family in
+    arch) want=pacman ;;
+    debian) want=apt-get ;;
+    fedora) want=dnf ;;
+    suse) want=zypper ;;
+    *) want='' ;;
+  esac
+  if [ -n "$family" ]; then
+    if has "$want"; then
+      tool=$want; how="$family family"
+    elif [ "$family" = fedora ] && has dnf5; then
+      tool=dnf5; how="$family family"
+    else
+      echo "litterbox-update: '$name' looks like a $family-family system ('$os_id') but has no $want" >&2
+      return 1
+    fi
+  else
+    for t in pacman apt-get dnf dnf5 zypper; do
+      if has "$t"; then tool=$t; how="distribution '${os_id:-unknown}' not recognised; using the package manager found"; break; fi
+    done
+    if [ -z "$tool" ]; then
+      echo "litterbox-update: '$name': no supported package manager found (os-release ID '${os_id:-?}')" >&2
+      return 1
+    fi
+  fi
+
+  case $tool in
+    pacman)
+      cmd="pacman -Syu --noconfirm"
+      if [ "$no_sandbox" = 1 ]; then
+        if [ "$can_nosandbox" = 1 ]; then cmd="$cmd --disable-sandbox"
+        else echo "litterbox-update: '$name': this pacman has no --disable-sandbox option" >&2; return 1; fi
+      fi ;;
+    apt-get) cmd="export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get -y upgrade" ;;
+    dnf|dnf5) cmd="$tool -y upgrade --refresh" ;;
+    zypper)
+      case $os_id in
+        opensuse-tumbleweed|opensuse-slowroll) verb=dup ;;
+        *) verb=up ;;
+      esac
+      cmd="zypper --non-interactive refresh && zypper --non-interactive $verb" ;;
+  esac
+  if [ "$no_sandbox" = 1 ] && [ "$tool" != pacman ]; then
+    echo "litterbox-update: note: --no-sandbox only applies to pacman; ignored for $tool" >&2
+  fi
+
+  echo "==> $name: ${os_id:-unknown}${os_ver:+ $os_ver} -> $tool ($how)"
+  if [ "$dry_run" = 1 ]; then
+    echo "    would run as root: $cmd"
+    return 0
+  fi
+  echo "    running as root: $cmd"
+  if "$LITTERBOX" enter "$name" --root -- "sh -c '$cmd'"; then
+    echo "==> $name: updated"
+  else
+    echo "litterbox-update: the update in '$name' failed" >&2
+    return 1
+  fi
+}
+
+failed=''
+for n in $names; do
+  update_one "$n" || failed="$failed $n"
+done
+
+if [ -n "$failed" ]; then
+  echo "litterbox-update: failed for:$failed" >&2
+  exit 1
+fi
+if [ "$dry_run" = 0 ]; then
+  echo "Done. These changes live in the container: they survive restarts but not a rebuild (litterbox build)."
+fi

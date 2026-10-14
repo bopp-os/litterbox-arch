@@ -30,7 +30,28 @@ case "\$1" in
   *) exit 1 ;;
 esac
 EOF
-printf '#!/bin/sh\nexit 0\n' > "$W/bin/litterbox"
+cat > "$W/bin/litterbox" <<'EOF'
+#!/bin/sh
+# Emulates `litterbox enter`: joins the words after -- with single spaces and NO quoting (lbx-init does this
+# and hands the string to the login shell), lets a shell re-parse them, then prints "enter NAME[ tty]"
+# followed by the words that shell produced, one per line.
+[ "$1" = enter ] || exit 2
+name=$2; shift 2
+tty=''
+while [ $# -gt 0 ]; do
+  case $1 in
+    --tty) tty=' tty'; shift 2 ;;
+    --interactive) shift 2 ;;
+    --root) shift ;;
+    --) shift; break ;;
+    *) shift ;;
+  esac
+done
+line=''
+for a in "$@"; do line="$line $a"; done
+printf 'enter %s%s\n' "$name" "$tty"
+sh -c "set -- $line; for w in \"\$@\"; do printf '%s\\n' \"\$w\"; done"
+EOF
 # xdg-mime lives in xbin so one test can run without it. Like xdg-utils it writes mimeapps.list.
 cat > "$W/xbin/xdg-mime" <<'EOF'
 #!/bin/sh
@@ -114,5 +135,17 @@ for bad in 'Bad' 'a b' '1x' 'x;y' 'x/y' ''; do
 done
 $X dev --bin foo --scheme x >/dev/null 2>&1 && fail "--scheme allowed with --bin" || ok "--scheme rejected with --bin"
 $X dev --list --url-handler >/dev/null 2>&1 && fail "--url-handler allowed with --list" || ok "--url-handler rejected with --list"
+
+
+# 10. A real OAuth callback must survive the trip into the sandbox. The launcher goes through litterbox-export --exec,
+#     because Litterbox itself joins arguments with plain spaces and the container's shell re-parses them: a bare
+#     "claude://cb?code=1&state=2" would be cut at the "&", and a hostile link could run commands.
+PATH=$XPATH $X dev --app claude-desktop --boxed >/dev/null 2>&1
+execline=$(sed -n 's/^Exec=//p' "$C")
+url="claude://login/callback?code=abc&state=xyz%20q;touch $W/PWN\$(touch $W/PWN)"
+set -f; set -- $execline; set +f
+launched=$(for t in "$@"; do [ "$t" = %u ] && printf '%s\0' "$url" || printf '%s\0' "$t"; done | xargs -0 sh -c '"$@"' _ | tr '\n' '|')
+[ "$launched" = "enter dev|boxed-run|/usr/bin/claude-desktop|$url|" ] && ok "OAuth-style URL reaches the app as one intact argument" || { echo "got: $launched"; fail "oauth url"; }
+[ ! -e "$W/PWN" ] && ok "a hostile URL is not executed by the container shell" || fail "URL was executed"
 
 [ "$FAILED" = 0 ] && echo "ALL PASSED" || { echo "SOME FAILED"; exit 1; }

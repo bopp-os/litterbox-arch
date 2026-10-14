@@ -64,20 +64,41 @@ case "\$1" in
   *) exit 1 ;;
 esac
 EOF
-printf '#!/bin/sh\nfor a in "$@"; do printf "%%s\\n" "$a"; done\n' > "$W/bin/litterbox"
+cat > "$W/bin/litterbox" <<'EOF'
+#!/bin/sh
+# Emulates `litterbox enter`: joins the words after -- with single spaces and NO quoting (lbx-init does this
+# and hands the string to the login shell), lets a shell re-parse them, then prints "enter NAME[ tty]"
+# followed by the words that shell produced, one per line.
+[ "$1" = enter ] || exit 2
+name=$2; shift 2
+tty=''
+while [ $# -gt 0 ]; do
+  case $1 in
+    --tty) tty=' tty'; shift 2 ;;
+    --interactive) shift 2 ;;
+    --root) shift ;;
+    --) shift; break ;;
+    *) shift ;;
+  esac
+done
+line=''
+for a in "$@"; do line="$line $a"; done
+printf 'enter %s%s\n' "$name" "$tty"
+sh -c "set -- $line; for w in \"\$@\"; do printf '%s\\n' \"\$w\"; done"
+EOF
 chmod +x "$W/bin/"*
 export PATH="$W/bin:$PATH" HOME="$W/home"
 unset XDG_DATA_HOME
 X="sh $SCRIPT"
 APPS="$HOME/.local/share/applications"; ICONS="$HOME/.local/share/icons"
-LB="$W/bin/litterbox"
+SELF="$SCRIPT"   # launchers call litterbox-export itself
 
 # --- app export ------------------------------------------------------------------------------------
 $X dev --app codium >/dev/null 2>&1 || fail "export codium failed"
 F="$APPS/litterbox-dev-codium.desktop"
 [ -f "$F" ] && ok "desktop file written" || fail "no desktop file"
 has "$F" "Name=VSCodium (dev)" && ok "Name gets the litterbox suffix" || fail "Name"
-has "$F" "Exec=$LB enter dev -- /usr/bin/codium --unity-launch %F" && ok "Exec runs through 'litterbox enter dev --' with original args and field codes" || { grep '^Exec' "$F"; fail "Exec"; }
+has "$F" "Exec=$SELF dev --exec -- /usr/bin/codium --unity-launch %F" && ok "Exec runs through 'litterbox-export dev --exec --' with original args and field codes" || { grep '^Exec' "$F"; fail "Exec"; }
 has "$F" "Icon=litterbox-dev-vscodium" && ok "Icon renamed to a namespaced theme icon" || fail "Icon"
 has "$F" "X-Litterbox-Export=dev" && ok "ownership marker present" || fail "marker"
 has "$F" "Terminal=false" && ok "Terminal=false" || fail "Terminal"
@@ -91,14 +112,14 @@ sum1=$(sha256sum "$F" | cut -d' ' -f1); $X dev --app codium >/dev/null 2>&1; [ "
 
 # wrap / boxed
 $X dev --app codium --boxed >/dev/null 2>&1
-has "$F" "Exec=$LB enter dev -- boxed-run /usr/bin/codium --unity-launch %F" && ok "--boxed inserts boxed-run" || fail "--boxed"
+has "$F" "Exec=$SELF dev --exec -- boxed-run /usr/bin/codium --unity-launch %F" && ok "--boxed inserts boxed-run" || fail "--boxed"
 $X dev --app codium --wrap 'a b' >/dev/null 2>&1 && fail "--wrap with a space accepted" || ok "--wrap with a space rejected"
 $X dev --app codium --wrap '$(touch pwned)' >/dev/null 2>&1 && fail "--wrap with shell syntax accepted" || ok "--wrap with shell syntax rejected"
 [ -e pwned ] && fail "command injection executed"
 
 # terminal app, pixmap + absolute icons
 $X dev --app htop >/dev/null 2>&1
-has "$APPS/litterbox-dev-htop.desktop" "Exec=$LB enter dev --tty true --interactive true -- htop" && has "$APPS/litterbox-dev-htop.desktop" "Terminal=true" && ok "Terminal=true apps get tty flags" || fail "terminal app"
+has "$APPS/litterbox-dev-htop.desktop" "Exec=$SELF dev --exec --tty -- htop" && has "$APPS/litterbox-dev-htop.desktop" "Terminal=true" && ok "Terminal=true apps get tty flags" || fail "terminal app"
 $X dev --app pixonly >/dev/null 2>&1
 has "$APPS/litterbox-dev-pixonly.desktop" "Icon=$ICONS/litterbox/dev/pixonly.png" && [ "$(cat "$ICONS/litterbox/dev/pixonly.png")" = "PIXMAP-bytes" ] && ok "pixmaps icon fetched and referenced by path" || fail "pixmap icon"
 $X dev --app abs >/dev/null 2>&1
@@ -129,13 +150,54 @@ BO="$W/binout"
 $X dev --bin codium --export-path "$BO" >/dev/null 2>&1
 [ -x "$BO/codium" ] && sh -n "$BO/codium" && ok "bin wrapper created, executable, valid sh" || fail "bin wrapper"
 got=$(sh "$BO/codium" 'a b' "it's" </dev/null | tr '\n' '|')
-[ "$got" = "enter|dev|--|codium|a b|it's|" ] && ok "wrapper passes arguments through intact" || fail "wrapper args: $got"
+[ "$got" = "enter dev|codium|a b|it's|" ] && ok "wrapper passes arguments through intact" || fail "wrapper args: $got"
 $X dev --bin codium --export-path "$BO" --boxed >/dev/null 2>&1
-got=$(sh "$BO/codium" x </dev/null | tr '\n' '|'); [ "$got" = "enter|dev|--|boxed-run|codium|x|" ] && ok "--boxed in wrapper" || fail "boxed wrapper: $got"
-got=$(script -qec "sh $BO/codium x" /dev/null </dev/null | tr -d '\r' | tr '\n' '|'); [ "$got" = "enter|dev|--tty|true|--interactive|true|--|boxed-run|codium|x|" ] && ok "interactive (tty) path adds --tty/--interactive" || fail "tty wrapper: $got"
+got=$(sh "$BO/codium" x </dev/null | tr '\n' '|'); [ "$got" = "enter dev|boxed-run|codium|x|" ] && ok "--boxed in wrapper" || fail "boxed wrapper: $got"
+got=$(script -qec "sh $BO/codium x" /dev/null </dev/null | tr -d '\r' | tr '\n' '|'); [ "$got" = "enter dev tty|boxed-run|codium|x|" ] && ok "interactive (tty) path adds --tty/--interactive" || fail "tty wrapper: $got"
 printf '#!/bin/sh\necho real git\n' > "$BO/git"; chmod +x "$BO/git"
 $X dev --bin git --export-path "$BO" >/dev/null 2>&1 && fail "overwrote a real binary" || { grep -q 'real git' "$BO/git" && ok "existing non-exported command is not overwritten"; }
 $X dev --bin 'rm -rf /' --export-path "$BO" >/dev/null 2>&1 && fail "bin with spaces accepted" || ok "bin command with spaces rejected"
+
+
+# --- --exec: every argument reaches the container shell exactly as given -----------------------------------------
+# (the stub re-parses the joined string like lbx-init's login shell does, so unquoted metacharacters would bite)
+PWN="$W/PWN"
+check_args() { # check_args DESCRIPTION ARG...
+  desc=$1; shift
+  want="enter dev|cmd"; for a in "$@"; do want="$want|$a"; done; want="$want|"
+  got=$($X dev --exec -- cmd "$@" 2>&1 | tr '\n' '|')
+  [ "$got" = "$want" ] && ok "--exec keeps $desc intact" || { echo "want: $want"; echo "got:  $got"; fail "--exec mangled $desc"; }
+}
+check_args "spaces" 'a b'
+check_args "single quotes" "it's" "a'b'c"
+check_args "double quotes" 'say "hi"'
+check_args "command substitution" "\$(touch $PWN)"
+check_args "backticks" "\`touch $PWN\`"
+check_args "semicolons and ampersands" "x;touch $PWN" "x&touch $PWN" 'a|b' 'a&&b'
+check_args "globs, tilde, hash, bang" '*' '~' '#c' '!!' '$HOME'
+check_args "an OAuth-style callback URL" 'claude://login/callback?code=1&state=2%203#frag'
+check_args "empty and option-like arguments" '' '-n' '--k=v with space'
+[ ! -e "$PWN" ] && ok "no argument was ever executed by the container shell" || fail "an argument was executed"
+
+out=$($X dev --exec -- cmd 'a\b' 2>&1); rc=$?
+[ "$rc" != 0 ] && echo "$out" | grep -q 'backslash' && ! echo "$out" | grep -q '^enter dev' && ok "an argument with a backslash is refused, nothing is run" || { echo "$out"; fail "backslash"; }
+nlarg=$(printf 'a\nb')
+out=$($X dev --exec -- cmd "$nlarg" 2>&1); rc=$?
+[ "$rc" != 0 ] && echo "$out" | grep -q 'newline' && ! echo "$out" | grep -q '^enter dev' && ok "an argument with a newline is refused, nothing is run" || { echo "$out"; fail "newline"; }
+got=$($X dev --exec --tty -- htop | tr '\n' '|'); [ "$got" = "enter dev tty|htop|" ] && ok "--exec --tty adds the tty flags" || fail "exec tty: $got"
+$X dev --exec >/dev/null 2>&1 && fail "--exec without a command accepted" || ok "--exec needs a command"
+$X dev --exec --delete -- x >/dev/null 2>&1 && fail "--exec --delete accepted" || ok "--exec rejects other modes' flags"
+$X dev --tty >/dev/null 2>&1 && fail "--tty alone accepted" || ok "--tty only applies to --exec"
+$X dev --app codium -- foo >/dev/null 2>&1 && fail "arguments after -- accepted for --app" || ok "arguments after -- are only for --exec"
+
+# An exported launcher, run the way a desktop would: substitute the field code, execute the Exec line.
+$X dev --app codium --boxed >/dev/null 2>&1
+execline=$(sed -n 's/^Exec=//p' "$F")
+hostile="claude://cb?code=1&state=2;touch $PWN\$(touch $PWN)"
+set -f; set -- $execline; set +f
+launched=$(for t in "$@"; do [ "$t" = %F ] && printf '%s\0' "$hostile" || printf '%s\0' "$t"; done | xargs -0 sh -c '"$@"' _ | tr '\n' '|')
+[ "$launched" = "enter dev|boxed-run|/usr/bin/codium|--unity-launch|$hostile|" ] && ok "exported launcher: a hostile URL in %F arrives as a single intact argument" || { echo "got: $launched"; fail "launcher with hostile URL"; }
+[ ! -e "$PWN" ] && ok "...and nothing in it was executed" || fail "launcher executed the URL"
 
 # --- list ----------------------------------------------------------------------------------------------
 lst=$($X dev --list --export-path "$BO")

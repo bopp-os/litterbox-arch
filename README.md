@@ -52,6 +52,30 @@ litterbox-export dev --app codium --delete                         # exact names
 `http`, `https`, `mailto`, `file` and similar. `--scheme NAME` adds a scheme for apps whose `.desktop` file does not declare one.
 Files passed from the host cannot be opened inside the sandbox, which only sees its own home.
 
+Launchers call `litterbox-export <name> --exec -- <command> [args]` instead of `litterbox enter` directly, and that matters:
+Litterbox runs `$SHELL -l -c '<command> <args joined with single spaces>'` in the container **without quoting**, so the login shell
+(bash, fish, ...) re-parses every argument. A browser URL like `claude://cb?code=1&state=2` would be cut at the `&`, and a
+hostile link could run commands inside the sandbox. `--exec` single-quotes every argument. Arguments containing a backslash or a
+newline are refused (bash and fish disagree about backslashes inside quotes). If you call `litterbox enter` yourself with
+arguments from an untrusted source, quote them the same way.
+
+**`litterbox-update`** (host) updates the packages inside a Litterbox and works out the package manager for you:
+
+```
+litterbox-update dev                 # detect, then update as root
+litterbox-update --dry-run dev       # only show what it found and what it would run
+litterbox-update dev work scratch    # several at once
+litterbox-update --all               # every Litterbox with a definition in ~/Litterbox/definitions
+```
+
+It runs `litterbox enter <name> --root` twice: once to read the container's `os-release` and see which package managers exist,
+once to run the update. The package manager comes from the distribution (Arch family `pacman -Syu --noconfirm`; Debian family
+`apt-get update && apt-get -y upgrade`; Fedora family `dnf -y upgrade --refresh`, or `dnf5`; openSUSE Tumbleweed `zypper dup`,
+Leap `zypper up`), falling back to whatever it finds for unknown distributions. What the container reports only *selects* one of
+these fixed commands; it is sanitised and never pasted into a command. Updates are made inside the running container: they survive
+restarts but are lost when the Litterbox is rebuilt or deleted, so anything permanent belongs in its Dockerfile. If pacman fails
+with sandbox or Landlock errors inside the container, try `--no-sandbox` (pacman 7+).
+
 ## How updates reach users
 
 ```
@@ -106,6 +130,10 @@ session, or a real `makepkg` run. The first workflow run (`dry_run`) is the firs
 Known unverified points:
 
 * `--tty true --interactive true` (used for terminal apps and interactive `--bin` wrappers) is inferred from Litterbox's argument definitions, not run.
+* Litterbox's join-without-quoting behaviour is read from its source (`lbx-init`), and the tests emulate it with `sh`. Nothing here has
+  been run against the real thing, and the fish dialect (the CachyOS template's shell) was not exercised: the generated commands avoid
+  single quotes and backslashes inside quoted text, which should make bash and fish parse them the same.
+* `litterbox-update` has not run against a real container: whether pacman's download sandbox works as root inside rootless Podman is untested.
 * `boxed-run` starts a new D-Bus session and keyring daemon on every launch, including for URL-handler launches that only forward a link to a running app.
 * `osv-scanner`'s JSON shape and exit codes are taken from its documentation.
 

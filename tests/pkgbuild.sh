@@ -52,8 +52,19 @@ want=$(printf '%s\n' \
   '644 usr/share/litterbox-sandbox-addons/boxed-run/packages.arch' \
   '755 usr/bin/litterbox-addon' \
   '755 usr/bin/litterbox-export' \
+  '755 usr/bin/litterbox-update' \
   '755 usr/share/litterbox-sandbox-addons/boxed-run/boxed-run' | sort)
 [ "$got" = "$want" ] && ok "addons package() installs exactly the expected files and modes" || { echo "--- got"; echo "$got"; echo "--- want"; echo "$want"; fail "addons file list"; }
+
+# File modes in the repo: scripts executable, PKGBUILDs and data files not (a blanket chmod +x once got this wrong).
+badmode=''
+for f in "$ROOT"/litterbox-sandbox/PKGBUILD "$ROOT"/litterbox-sandbox-addons/PKGBUILD "$ROOT"/litterbox-sandbox-addons/boxed-run.packages.arch; do
+  if [ -x "$f" ]; then badmode="$badmode ${f#"$ROOT"/}"; fi
+done
+for f in boxed-run litterbox-addon litterbox-export litterbox-update; do
+  if [ ! -x "$ROOT/litterbox-sandbox-addons/$f" ]; then badmode="$badmode litterbox-sandbox-addons/$f(not executable)"; fi
+done
+[ -z "$badmode" ] && ok "scripts are executable; PKGBUILDs and data files are not" || fail "wrong file modes:$badmode"
 
 # The mirror in bopp-os/pkgbuilds copies a package folder wholesale: nothing but PKGBUILD + its sources may live there.
 for pkg in litterbox-sandbox litterbox-sandbox-addons; do

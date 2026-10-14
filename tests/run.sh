@@ -1,11 +1,11 @@
 #!/bin/sh
 # Runs every test suite and (if installed) shellcheck. Exit status is non-zero if anything failed.
-# Usage: sh tests/run.sh [suite ...]      suites: pkgbuild installer boxed-run export urlhandler update scan publish
+# Usage: sh tests/run.sh [suite ...]      suites: pkgbuild installer boxed-run export urlhandler litterbox-update update scan publish
 # Needs: sh, bash, tar, awk, sed, curl (network), `script` (util-linux). Optional: shellcheck.
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(dirname "$HERE")
-SUITES=${*:-pkgbuild installer boxed-run export urlhandler update scan publish}
+SUITES=${*:-pkgbuild installer boxed-run export urlhandler litterbox-update update scan publish}
 
 failed=""
 for s in $SUITES; do
@@ -21,7 +21,7 @@ if command -v shellcheck >/dev/null 2>&1; then
   cd "$ROOT" || exit 1
   # Shipped scripts and tools: everything. Tests: warnings and errors only (they use `A && ok || fail` on purpose).
   if shellcheck -s sh litterbox-sandbox-addons/boxed-run litterbox-sandbox-addons/litterbox-addon \
-       litterbox-sandbox-addons/litterbox-export tools/update-litterbox tools/scan-release tools/publish-update \
+       litterbox-sandbox-addons/litterbox-export litterbox-sandbox-addons/litterbox-update tools/update-litterbox tools/scan-release tools/publish-update \
      && shellcheck -s sh -S warning tests/*.sh; then
     echo "PASS: shellcheck clean"
   else

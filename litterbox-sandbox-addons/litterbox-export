@@ -5,6 +5,12 @@
 # .desktop file and icon out of the Litterbox's container with `podman cp` (nothing is executed
 # inside it), keeps only a whitelist of keys, and writes a launcher that starts the program with
 # `litterbox enter`.
+#
+# Why launchers go through `litterbox-export NAME --exec` instead of calling `litterbox enter` directly:
+# Litterbox runs "$SHELL -l -c '<command> <arg> <arg>...'" in the container, joining the arguments with
+# plain spaces and NO quoting, so the login shell (bash, fish, ...) re-parses every argument. A URL such as
+# claude://cb?code=1&state=2 would be cut at the "&", and a hostile link could run commands. --exec quotes
+# each argument so it arrives exactly as given.
 set -eu
 
 DATA_HOME="${XDG_DATA_HOME:-${HOME:?HOME is not set}/.local/share}"
@@ -21,6 +27,7 @@ usage() {
 Usage: litterbox-export <name> --app <app> [--boxed | --wrap CMD] [--scheme SCHEME]... [--url-handler] [--delete]
        litterbox-export <name> --bin <command> [--export-path DIR] [--boxed | --wrap CMD] [--delete]
        litterbox-export <name> --list
+       litterbox-export <name> --exec [--tty] -- <command> [args...]
 
   --app <app>         Add <app> from the Litterbox <name> to the host application menu.
                       <app> is a .desktop file name (codium, codium.desktop) or part of one.
@@ -35,6 +42,9 @@ Usage: litterbox-export <name> --app <app> [--boxed | --wrap CMD] [--scheme SCHE
                       file, ...) are never registered.
   --delete            Remove what was exported (needs no running Litterbox)
   --list              Show what is exported from <name>
+  --exec [--tty] --   Run <command> in the Litterbox with every argument quoted safely. This is what
+                      exported launchers call; --tty adds --tty/--interactive for terminal programs.
+                      Arguments containing a backslash or a newline are refused.
 
 Apps are read from /usr/share/applications in the Litterbox image. Files passed from the host
 cannot be opened inside the Litterbox: it only sees its own home.
@@ -60,10 +70,10 @@ name=$1; shift
 valid_name "$name" || die "invalid Litterbox name '$name'"
 
 mode=''; target=''; bin_dir="${HOME}/.local/bin"; wrap=''; delete=0
-url_handler=0; extra_schemes=''
+url_handler=0; extra_schemes=''; tty=0
 
 set_mode() {
-  [ -z "$mode" ] || die "use only one of --app, --bin, --list"
+  [ -z "$mode" ] || die "use only one of --app, --bin, --list, --exec"
   mode=$1; target=$2
 }
 
@@ -88,6 +98,9 @@ while [ $# -gt 0 ]; do
       esac
       shift 2 ;;
     --list) set_mode list ''; shift ;;
+    --exec) set_mode exec ''; shift ;;
+    --tty) tty=1; shift ;;
+    --) shift; break ;;   # everything after is the command for --exec
     --boxed) wrap=boxed-run; shift ;;
     --url-handler) url_handler=1; shift ;;
     --delete) delete=1; shift ;;
@@ -97,6 +110,15 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$mode" ] || { usage >&2; exit 1; }
+if [ "$mode" = exec ]; then
+  [ $# -gt 0 ] || die "--exec needs a command after --"
+  if [ "$delete" = 1 ] || [ -n "$wrap" ] || [ "$url_handler" = 1 ] || [ -n "$extra_schemes" ]; then
+    die "--exec takes only --tty and the command"
+  fi
+else
+  [ $# -eq 0 ] || die "unexpected argument '$1' (arguments after -- are only for --exec)"
+  [ "$tty" = 0 ] || die "--tty only applies to --exec"
+fi
 if [ -n "$wrap" ]; then valid_token "$wrap" || die "invalid --wrap value '$wrap'"; fi
 if [ "$mode" != app ] && { [ "$url_handler" = 1 ] || [ -n "$extra_schemes" ]; }; then
   die "--scheme and --url-handler only apply to --app"
@@ -106,6 +128,42 @@ LITTERBOX=$(command -v litterbox || echo /usr/bin/litterbox)
 case $LITTERBOX in
   *[!A-Za-z0-9._+/-]*) die "unsupported characters in the path to litterbox: $LITTERBOX" ;;
 esac
+# Launchers call this script, so they need its absolute path.
+case $0 in
+  */*) SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0") ;;
+  *) SELF=$(command -v "$0" || echo "$0") ;;
+esac
+case $SELF in
+  /*) ;;
+  *) die "cannot work out the absolute path of this script" ;;
+esac
+case $SELF in
+  *[!A-Za-z0-9._+/-]*) die "unsupported characters in the path to this script: $SELF" ;;
+esac
+
+# --- running a command in the Litterbox (see the header for why every argument is quoted) --------------------
+safe_arg() {
+  case $1 in
+    *\\*) die "refusing argument with a backslash (the Litterbox shell may be bash or fish and they disagree about it): $1" ;;
+  esac
+  nl=$(printf '\n_'); nl=${nl%_}
+  case $1 in
+    *"$nl"*) die "refusing argument that contains a newline" ;;
+  esac
+}
+
+# shq ARG: ARG in single quotes. Embedded single quotes become '\'' which bash, dash and fish all read the same way.
+shq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+
+run_exec() {
+  line=''
+  for a in "$@"; do safe_arg "$a"; done
+  for a in "$@"; do line="$line$(shq "$a") "; done
+  if [ "$tty" = 1 ]; then
+    exec "$LITTERBOX" enter "$name" --tty true --interactive true -- "$line"
+  fi
+  exec "$LITTERBOX" enter "$name" -- "$line"
+}
 
 # --- reading from the container (never executes anything in it) -------------------------------
 cid=''
@@ -330,8 +388,8 @@ export_app() {
   export_icon "$(field Icon)"
   icon_line=${ICON_OUT:-application-x-executable}
 
-  exec_line="$LITTERBOX enter $name"
-  [ "$term" = false ] || exec_line="$exec_line --tty true --interactive true"
+  exec_line="$SELF $name --exec"
+  [ "$term" = false ] || exec_line="$exec_line --tty"
   exec_line="$exec_line --"
   [ -z "$wrap" ] || exec_line="$exec_line $wrap"
   exec_line="$exec_line $orig_exec"
@@ -415,9 +473,9 @@ export_bin() {
     echo "$BIN_MARK $name"
     echo "# Generated by litterbox-export. Remove with: litterbox-export $name --bin $target --delete"
     echo 'if [ -t 0 ]; then'
-    echo "  exec '$LITTERBOX' enter '$name' --tty true --interactive true --$w $target \"\$@\""
+    echo "  exec '$SELF' '$name' --exec --tty --$w $target \"\$@\""
     echo 'fi'
-    echo "exec '$LITTERBOX' enter '$name' --$w $target \"\$@\""
+    echo "exec '$SELF' '$name' --exec --$w $target \"\$@\""
   } > "$tmp"
   chmod 755 "$tmp"
   mv "$tmp" "$out"
@@ -459,5 +517,6 @@ case "$mode:$delete" in
   bin:0) export_bin ;;
   bin:1) delete_bin ;;
   list:0) list_exports ;;
+  exec:0) run_exec "$@" ;;
   list:1) die "--delete needs --app or --bin" ;;
 esac
