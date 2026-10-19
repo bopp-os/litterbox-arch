@@ -3,8 +3,8 @@
 Packaging and helper tools for running [Litterbox](https://litterbox.work/) (a Podman-based development sandbox with a
 confirm-before-sign SSH agent) on Arch, CachyOS and BoppOS.
 
-[bopp-os/pkgbuilds](https://github.com/bopp-os/pkgbuilds) mirrors the two package folders from here, so this repo is where
-the packages are written and kept up to date.
+[bopp-os/pkgbuilds](https://github.com/bopp-os/pkgbuilds) holds only links to this repo and builds the newest release tag of each package
+(see "Releases and the pkgbuilds link"), so this repo is where the packages are written and kept up to date.
 
 ## What is here
 
@@ -120,10 +120,10 @@ upstream Litterbox release
   -> upstream-litterbox.yml (daily, or run it by hand)
        verify  (read-only token, unprivileged user): release gate, tests, test build on Arch
        publish (write token, never runs upstream code): PR into this repo
-         clean  -> merged automatically
+         clean  -> merged automatically, then released as a tag (litterbox-sandbox-<ver>-<rel>)
          flagged -> left open, label needs-review
          failed  -> an issue, no PR
-  -> bopp-os/pkgbuilds nightly job sees the new pkgver and opens a mirror PR   <- the human review point
+  -> bopp-os/pkgbuilds nightly job sees the new tag and opens a PR bumping .upstream-ref   <- the human review point
   -> merging that PR builds and publishes the package
 ```
 
@@ -140,14 +140,27 @@ Compares the new release's three `Cargo.lock` files with `locks/` (what we ship)
 4. more than 30 crate names are new in one update (real releases 0.6.0 to 0.6.5 added between 0 and 7).
 
 If the scan cannot run properly it fails closed: no merge. It does **not** read Litterbox's own source or find a backdoor that is
-not in any advisory, so the mirror PR is a sanity check, not an audit. GitHub's Dependabot alerts (alerts only, no update PRs)
+not in any advisory, so the PR in pkgbuilds is a sanity check, not an audit. GitHub's Dependabot alerts (alerts only, no update PRs)
 also watch `locks/` between releases.
 
-## Rules for the pkgbuilds mirror
+## Releases and the pkgbuilds link
 
-* A package folder here is copied wholesale into `pkgbuilds/packages/<name>/`: only the PKGBUILD and its source files belong in it.
-* The mirror notices changes by comparing `pkgver`. **Any change to a script needs a `pkgver` bump** and updated `sha256sums`.
-* `sh tests/run.sh` checks the checksums and the installed file list.
+Two packages, two independent version streams:
+
+| package | its version comes from | released by | tag |
+|---|---|---|---|
+| `litterbox-sandbox` | upstream Litterbox's release (`pkgver` is upstream's, `pkgrel` is our packaging revision) | the daily workflow, automatically, right after a clean update merges; by hand for a packaging-only fix (bump `pkgrel`) | `litterbox-sandbox-0.6.5-1` |
+| `litterbox-sandbox-addons` | us: it is hosted here and changes whenever we decide, regardless of Litterbox | by hand | `litterbox-sandbox-addons-0.1.0-1` |
+
+To declare a release: bump `pkgver` (or `pkgrel`) in the package's PKGBUILD, merge to `main`, then run `tools/release <package>`. It refuses unless that
+version has no tag yet and the commit is on `origin/main`, runs the whole test suite on a clean export of the commit, and only then creates the tag
+and GitHub release (`--dry-run` shows what it would do). `pkgver` changes only when you declare a release, not with every commit.
+
+`bopp-os/pkgbuilds` holds **only links** to this repo: each of its `packages/<name>/` folders has `.upstream-url`, `.upstream-path` and `.upstream-ref`
+(the pinned release tag). Its nightly job opens a PR bumping `.upstream-ref` when a newer tag exists, and its build fetches the package files at that
+tag. So nothing here reaches the pacman repo until that PR in pkgbuilds is merged.
+
+Package folders hold only the PKGBUILD and its source files; `sh tests/run.sh` checks the checksums and the installed file list.
 
 ## Tests
 

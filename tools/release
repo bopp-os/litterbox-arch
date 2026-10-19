@@ -1,0 +1,85 @@
+#!/bin/sh
+# release - declare a release of one package: a git tag <package>-<pkgver>-<pkgrel> plus a GitHub release.
+#
+#   tools/release [--sha SHA] [--skip-tests] [--dry-run] <package>
+#
+# packages: litterbox-sandbox (version follows upstream Litterbox), litterbox-sandbox-addons (ours).
+#
+# bopp-os/pkgbuilds holds only links to this repo and builds the newest such tag, so a tag is the signal
+# "this version is built and tested". Nothing here trusts the working tree: the version is read from the
+# PKGBUILD at SHA, SHA must already be on origin/main, and the test suite runs on a clean export of SHA.
+# --skip-tests is for the update workflow, whose verify job has already built and tested the new version.
+# Test overrides: LBX_ROOT. Uses GH_REPO if set.
+set -eu
+
+ROOT="${LBX_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+PACKAGES='litterbox-sandbox litterbox-sandbox-addons'
+
+die() { echo "release: $*" >&2; exit 1; }
+
+usage() { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; }
+
+sha=''; skip_tests=0; dry_run=0; pkg=''
+while [ $# -gt 0 ]; do
+  case $1 in
+    --sha) [ $# -ge 2 ] || die "--sha needs a commit"; sha=$2; shift ;;
+    --skip-tests) skip_tests=1 ;;
+    -n|--dry-run) dry_run=1 ;;
+    -h|--help) usage; exit 0 ;;
+    -*) die "unknown option '$1'" ;;
+    *) [ -z "$pkg" ] || die "only one package"; pkg=$1 ;;
+  esac
+  shift
+done
+[ -n "$pkg" ] || { usage >&2; exit 1; }
+case " $PACKAGES " in *" $pkg "*) ;; *) die "unknown package '$pkg' (one of: $PACKAGES)" ;; esac
+
+cd "$ROOT"
+git fetch -q origin main --tags || die "could not fetch origin"
+sha=$(git rev-parse --verify "${sha:-HEAD}^{commit}") || die "no such commit"
+git merge-base --is-ancestor "$sha" origin/main || die "$sha is not on origin/main: push it first"
+
+pkgbuild=$(git show "$sha:$pkg/PKGBUILD") || die "$pkg/PKGBUILD does not exist at $sha"
+pkgver=$(printf '%s\n' "$pkgbuild" | sed -n 's/^pkgver=//p' | head -n 1 | tr -d "\"'")
+pkgrel=$(printf '%s\n' "$pkgbuild" | sed -n 's/^pkgrel=//p' | head -n 1 | tr -d "\"'")
+printf '%s\n' "$pkgver" | grep -Eq '^[0-9]+(\.[0-9]+)*$' || die "bad pkgver '$pkgver' in $pkg/PKGBUILD at $sha"
+printf '%s\n' "$pkgrel" | grep -Eq '^[0-9]+$' || die "bad pkgrel '$pkgrel' in $pkg/PKGBUILD at $sha"
+tag="$pkg-$pkgver-$pkgrel"
+
+if git rev-parse -q --verify "refs/tags/$tag" >/dev/null || [ -n "$(git ls-remote --tags origin "refs/tags/$tag")" ]; then
+  die "tag $tag already exists; bump pkgver (or pkgrel for a packaging-only change) first"
+fi
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+# Notes: what changed in this package's folder since its previous tag. The digit after the prefix keeps
+# litterbox-sandbox-addons-* tags from counting as litterbox-sandbox-* tags.
+prev=$(git tag -l "$pkg-[0-9]*" | sort -V | tail -n 1)
+{
+  if [ "$pkg" = litterbox-sandbox ]; then
+    echo "Packages Litterbox $pkgver (packaging revision $pkgrel): https://github.com/Gerharddc/litterbox/releases/tag/v$pkgver"
+    echo
+  fi
+  if [ -n "$prev" ]; then
+    echo "Changes in $pkg/ since $prev:"
+    changes=$(git log --format='- %s' "$prev..$sha" -- "$pkg")
+    if [ -n "$changes" ]; then printf '%s\n' "$changes"; else echo "- (none recorded)"; fi
+  else
+    echo "First release of $pkg."
+  fi
+} > "$tmp/notes.md"
+
+echo "Release $tag at $(git rev-parse --short "$sha")"
+sed 's/^/  | /' "$tmp/notes.md"
+if [ "$dry_run" = 1 ]; then echo "Dry run: nothing was tested or created."; exit 0; fi
+
+if [ "$skip_tests" = 0 ]; then
+  echo "Running the test suite on a clean export of $(git rev-parse --short "$sha") ..."
+  mkdir "$tmp/export"
+  git archive "$sha" | tar -x -C "$tmp/export"
+  sh "$tmp/export/tests/run.sh" || die "tests failed; not releasing"
+fi
+
+gh release create "$tag" --target "$sha" --title "$tag" --notes-file "$tmp/notes.md"
+echo "Released $tag."

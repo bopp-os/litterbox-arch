@@ -160,6 +160,17 @@ fi
 
 if gh pr merge "$n" --squash --delete-branch; then
   echo "Merged pull request #$n."
+  # Declare the release. The verify job already built and tested exactly this update, and merges made with
+  # GITHUB_TOKEN do not trigger push workflows, so it has to happen here. bopp-os/pkgbuilds follows these tags.
+  merge_sha=''
+  for _ in 1 2 3 4 5; do
+    merge_sha=$(gh pr view "$n" --json mergeCommit --jq '.mergeCommit.oid // empty' 2>/dev/null || true)
+    if [ -n "$merge_sha" ]; then break; fi
+    sleep 3
+  done
+  [ -n "$merge_sha" ] || die "merged pull request #$n but could not find its merge commit; run: tools/release litterbox-sandbox"
+  sh "${LBX_RELEASE_TOOL:-$ROOT/tools/release}" --skip-tests --sha "$merge_sha" litterbox-sandbox \
+    || die "merged pull request #$n but declaring the release failed; run: tools/release litterbox-sandbox"
 else
   gh pr edit "$n" --add-label needs-review || true
   echo "::warning::Could not merge pull request #$n automatically; it is left open."

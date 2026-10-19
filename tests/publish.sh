@@ -43,11 +43,17 @@ case "$*" in
   "pr list "*) if [ -n "${EXISTING_PR:-}" ]; then echo "$EXISTING_PR"; elif [ -f "$STUB_DIR/pr_created" ]; then echo 7; fi ;;
   "pr create "*) touch "$STUB_DIR/pr_created"; echo "https://github.com/bopp-os/litterbox-arch/pull/7" ;;
   "pr merge "*) [ -z "${STUB_MERGE_FAIL:-}" ] || exit 1 ;;
+  "pr view "*) [ -n "${STUB_NO_MERGE_COMMIT:-}" ] || echo cafe0123456789cafe0123456789cafe01234567 ;;
   "issue list "*) [ -z "${EXISTING_ISSUE:-}" ] || echo "$EXISTING_ISSUE" ;;
 esac
 exit 0
 EOF
-chmod +x "$BIN/osv-stub" "$BIN/gh"
+cat > "$BIN/release-stub" <<'EOF'
+#!/bin/sh
+echo "release $*" >> "$RELEASE_LOG"
+exit "${RELEASE_RC:-0}"
+EOF
+chmod +x "$BIN/osv-stub" "$BIN/gh" "$BIN/release-stub"
 
 # --- fixture repo + fake GitHub ----------------------------------------------------------------------------
 cp "$ROOT/litterbox-sandbox/PKGBUILD" "$FX/litterbox-sandbox/PKGBUILD"
@@ -76,7 +82,7 @@ reset_all() {
   git -C "$FX" checkout -q main; git -C "$FX" reset -q --hard; git -C "$FX" clean -fdq
   git -C "$FX" branch -D "$BRANCH" >/dev/null 2>&1 || true
   git --git-dir="$ORIGIN" branch -D "$BRANCH" >/dev/null 2>&1 || true
-  : > "$LOG"; rm -f "$W/pr_created" "$W/last-pr.md" "$W/last-issue.md"; mkdir -p "$W/reports"
+  : > "$LOG"; : > "$W/release.log"; rm -f "$W/pr_created" "$W/last-pr.md" "$W/last-issue.md"; mkdir -p "$W/reports"
 }
 branch_exists() { git --git-dir="$ORIGIN" rev-parse --verify -q "$BRANCH" >/dev/null; }
 logged() { grep -q -- "$1" "$LOG"; }
@@ -84,7 +90,7 @@ logged() { grep -q -- "$1" "$LOG"; }
 # publish [VAR=val ...]: run tools/publish-update with the happy-path environment plus overrides
 publish() {
   out=$(env LBX_ROOT="$FX" GH_LOG="$LOG" STUB_DIR="$W" PATH="$BIN:$PATH" \
-        LITTERBOX_TARBALL_URL_BASE="file://$UP" OSV_SCANNER="$BIN/osv-stub" NOTES_FILE="$W/notes.txt" \
+        LITTERBOX_TARBALL_URL_BASE="file://$UP" OSV_SCANNER="$BIN/osv-stub" LBX_RELEASE_TOOL="$BIN/release-stub" RELEASE_LOG="$W/release.log" NOTES_FILE="$W/notes.txt" \
         CURRENT=0.6.5 TARGET=0.7.0 V_SCAN=0 V_TESTS=success V_BUILD=success \
         RUN_URL=https://github.com/bopp-os/litterbox-arch/actions/runs/1 REPORT_DIR="$W/reports" \
         "$@" sh "$ROOT/tools/publish-update" 2>&1); rc=$?
@@ -104,11 +110,15 @@ logged 'pr merge 7 --squash --delete-branch' && ok "clean update is squash-merge
 grep -q 'Result: \*\*clean\*\*' "$W/last-pr.md" && grep -q '^    Fixes the thing\.' "$W/last-pr.md" && ok "PR body has the gate report and the release notes (indented)" || fail "PR body"
 [ "$(git -C "$FX" rev-parse main)" = "$(git --git-dir="$ORIGIN" rev-parse main)" ] && ok "the base branch itself is never pushed to" || fail "main was touched"
 
+grep -qx 'release --skip-tests --sha cafe0123456789cafe0123456789cafe01234567 litterbox-sandbox' "$W/release.log" && ok "after a clean merge the litterbox-sandbox release is declared at the merge commit (tests already ran)" || { cat "$W/release.log"; fail "release not declared"; }
+
 # --- 2. held by the gate: left open --------------------------------------------------------------------------------
 reset_all; publish TARGET=0.8.0
 [ "$rc" = 0 ] && ok "held update exits 0" || { echo "$out"; fail "hold rc=$rc"; }
 ! logged 'pr merge' && logged 'pr edit 7 --add-label needs-review' && ok "advisory in the new version: PR labelled needs-review, not merged" || { cat "$LOG"; fail "hold handling"; }
 grep -q 'HOLD' "$W/last-pr.md" && grep -q 'RUSTSEC-2099-9999' "$W/last-pr.md" && ok "the PR body says why it was held" || fail "hold body"
+
+[ ! -s "$W/release.log" ] && ok "a held update is not released" || fail "held update released"
 
 # --- 3. existing PR is updated, not duplicated -------------------------------------------------------------------------
 reset_all; publish EXISTING_PR=5
@@ -152,6 +162,14 @@ printf 'Fixes the thing.\n\nSee https://example.invalid for details.\n' > "$W/no
 # --- 8. merge refused: PR stays open ---------------------------------------------------------------------------------------------------
 reset_all; publish STUB_MERGE_FAIL=1
 [ "$rc" = 0 ] && logged 'pr edit 7 --add-label needs-review' && echo "$out" | grep -q 'left open' && ok "a refused merge leaves the PR open and labelled" || { echo "$out"; fail "merge refusal"; }
+
+[ ! -s "$W/release.log" ] && ok "a refused merge is not released" || fail "refused merge released"
+reset_all; publish RELEASE_RC=1
+[ "$rc" != 0 ] && echo "$out" | grep -q 'declaring the release failed' && ok "a failing release makes the run fail loudly (the merge already happened)" || { echo "$out"; fail "release failure"; }
+reset_all; publish STUB_NO_MERGE_COMMIT=1
+[ "$rc" != 0 ] && echo "$out" | grep -q 'could not find its merge commit' && ok "no merge commit found: fails loudly with the manual command" || { echo "$out"; fail "no merge commit"; }
+reset_all; publish V_BUILD=failure
+[ ! -s "$W/release.log" ] && ok "a failed check is not released" || fail "failed check released"
 
 # --- 9. guards --------------------------------------------------------------------------------------------------------------------------
 reset_all; echo stray > "$FX/stray.txt"; publish
