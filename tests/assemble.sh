@@ -16,6 +16,9 @@ mkdir -p "$TPL" "$BIN" "$W/addons/boxed-run" "$W/home"
 for t in cachyos fedora tumbleweed ubuntu-latest; do
   curl -fsSL "https://raw.githubusercontent.com/Gerharddc/litterbox/v0.6.5/litterbox/templates/$t.Dockerfile" -o "$TPL/$t.Dockerfile" || { echo "FAIL: cannot fetch template $t (needs network)"; exit 1; }
 done
+# The CachyOS CPU-variant templates that litterbox-sandbox's patch adds: upstream's cachyos template with another base image.
+sed 's#^FROM .*#FROM ghcr.io/bopp-os/cachyos-docker/cachyos-znver4:latest#' "$TPL/cachyos.Dockerfile" > "$TPL/cachyos-znver4.Dockerfile"
+sed 's#^FROM .*#FROM docker.io/cachyos/cachyos-v4:latest#' "$TPL/cachyos.Dockerfile" > "$TPL/cachyos-v4.Dockerfile"
 cp "$SRC/boxed-run" "$SRC/boxed-run.packages.arch" "$W/addons/boxed-run/"; mv "$W/addons/boxed-run/boxed-run.packages.arch" "$W/addons/boxed-run/packages.arch"
 printf '#!/bin/sh\necho "litterbox $*" >> "%s/litterbox.log"\n' "$W" > "$BIN/litterbox"; chmod +x "$BIN/litterbox"
 
@@ -141,6 +144,12 @@ printf 'FROM scratch\n' > "$TPL/weird.Dockerfile"
 clean; run --list-templates
 echo "$out" | grep -q '^cachyos (arch family, pacman -S --noconfirm)' && echo "$out" | grep -q '^tumbleweed (suse family' && echo "$out" | grep -q '^weird (not supported' && ok "--list-templates shows each template, its family, and flags unknown ones" || { echo "$out"; fail "list templates"; }
 rm -f "$TPL/weird.Dockerfile"
+echo "$out" | grep -q '^cachyos-znver4 (arch family' && echo "$out" | grep -q '^cachyos-v4 (arch family' && ok "--list-templates: the CachyOS CPU variants are arch family" || { echo "$out"; fail "cpu variants listed"; }
+for t in cachyos-znver4 cachyos-v4; do
+  clean; run cpu -t $t -p git -a boxed-run
+  [ "$rc" = 0 ] && head -n 3 "$DEFS/cpu.Dockerfile" | grep -q "^FROM .*${t#cachyos-}\|^FROM .*cachyos-${t#cachyos-}" && has "$DEFS/cpu.Dockerfile" 'RUN pacman -S --noconfirm --needed git' && has "$DEFS/cpu.Dockerfile" '# >>> litterbox-addons >>>' \
+    && ok "$t: its own base image, pacman packages and the addon block" || { echo "$out"; head -n 4 "$DEFS/cpu.Dockerfile"; fail "$t template"; }
+done
 out=$(env LITTERBOX_TEMPLATE_DIR="$W/none" LITTERBOX_ROOT="$LBX" HOME="$W/home" sh "$SCRIPT" x 2>&1); rc=$?
 [ "$rc" != 0 ] && echo "$out" | grep -q 'no templates found' && ok "a missing template directory is a clear error" || fail "missing templates"
 

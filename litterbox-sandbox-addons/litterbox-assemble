@@ -28,7 +28,8 @@ Creates ~/Litterbox/definitions/<name>.Dockerfile and <name>.ron. Then run: litt
 (when it asks whether to change the settings, answer No to keep the generated ones).
 
 Options:
-  -t, --template T    cachyos (default), fedora, tumbleweed or ubuntu-latest
+  -t, --template T    cachyos (default), cachyos-v4, cachyos-znver4, fedora, tumbleweed or ubuntu-latest
+                        (see --list-templates; the cachyos-v4/znver4 ones are added by this package's patch)
   -p, --package PKG   Extra package to install in the image (repeatable; a quoted list also works)
   -a, --addon NAME    Add a litterbox-addon addon, e.g. boxed-run (Arch/CachyOS templates only)
   -s, --set KEY=VAL   A setting for <name>.ron (repeatable). All default to the most isolated value.
@@ -63,7 +64,7 @@ valid_pkg() { printf '%s\n' "$1" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9@._+:-]*$'; }
 
 template_family() {
   case $1 in
-    cachyos) echo arch ;;
+    cachyos|cachyos-v4|cachyos-znver4) echo arch ;;
     fedora) echo fedora ;;
     tumbleweed) echo suse ;;
     ubuntu-latest) echo debian ;;
