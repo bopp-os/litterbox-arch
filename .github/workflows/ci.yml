@@ -1,0 +1,145 @@
+name: CI
+
+# Runs on every push to main and every pull request: the repository tests, then a real makepkg build of each
+# package in an Arch container. Read-only token, nothing is published; bopp-os/pkgbuilds builds and publishes
+# a release after its own review PR. Pull requests opened by the update workflow use GITHUB_TOKEN and do not
+# trigger this workflow, so do not make it a required check on main (auto-merge would wait forever).
+#
+# The litterbox-sandbox build compiles Litterbox from source (about 15 minutes), so on pushes and pull
+# requests it runs only when litterbox-sandbox/, locks/ or this file changed. Manual runs build everything.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container: archlinux:latest
+    permissions:
+      contents: read
+    steps:
+      # Same tool list as the update workflow, plus zsh so the zsh completion file is syntax-checked.
+      - name: Install tools
+        run: pacman -Syu --noconfirm --needed base-devel git jq osv-scanner namcap shellcheck fish zsh
+
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Mark workspace safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Repository tests
+        run: sh tests/run.sh
+
+  build:
+    name: Build ${{ matrix.package }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    container: archlinux:latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [litterbox-sandbox, litterbox-sandbox-addons]
+    steps:
+      - name: Install tools
+        run: pacman -Syu --noconfirm --needed base-devel git jq namcap
+
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Mark workspace safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Decide whether to build
+        id: decide
+        env:
+          PKG: ${{ matrix.package }}
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -eu
+          build=true
+          if [ "$EVENT" != workflow_dispatch ] && printf '%s' "$BASE" | grep -Eq '^[0-9a-f]{40}$' && git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            paths=("$PKG" .github/workflows/ci.yml)
+            if [ "$PKG" = litterbox-sandbox ]; then paths+=(locks); fi
+            if git diff --quiet "$BASE" HEAD -- "${paths[@]}"; then build=false; fi
+          fi
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          if [ "$build" = false ]; then
+            echo "$PKG: nothing under ${paths[*]} changed since ${BASE:0:7}; build skipped." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Install the package's dependencies
+        if: steps.decide.outputs.build == 'true'
+        env:
+          PKG: ${{ matrix.package }}
+        run: |
+          set -eu
+          # Installed as root up front so the build needs no sudo. Our own litterbox-sandbox is not in the Arch
+          # repositories, so it is left out here and the addons build skips the dependency check (--nodeps).
+          mapfile -t pkgs < <(bash -c 'cd "$1" && source ./PKGBUILD; printf "%s\n" "${depends[@]}" "${makedepends[@]}"' _ "$PKG" \
+            | sed 's/[<>=].*//' | grep -vx litterbox-sandbox | sort -u)
+          pacman -S --noconfirm --needed "${pkgs[@]}"
+
+      - name: Build the package (unprivileged user, no sudo)
+        if: steps.decide.outputs.build == 'true'
+        env:
+          PKG: ${{ matrix.package }}
+        run: |
+          set -eu
+          flags='--noconfirm --noprogressbar'
+          if [ "$PKG" = litterbox-sandbox-addons ]; then flags="$flags --nodeps"; fi
+          useradd -m builder
+          install -d -o builder -g builder /home/builder/build
+          cp -r "$PKG"/. /home/builder/build/
+          chown -R builder:builder /home/builder/build
+          rc=0
+          runuser -l builder -c "cd /home/builder/build && makepkg $flags" > "$RUNNER_TEMP/build.log" 2>&1 || rc=$?
+          tail -n 60 "$RUNNER_TEMP/build.log"
+          exit $rc
+
+      - name: Check the result
+        if: steps.decide.outputs.build == 'true'
+        env:
+          PKG: ${{ matrix.package }}
+        run: |
+          set -eu
+          cd /home/builder/build
+          set -- ./*.pkg.tar.*
+          # Exactly one package named after the folder: a stray <name>-debug package would be published too.
+          if [ $# -ne 1 ]; then echo "expected exactly one package file, found: $*"; exit 1; fi
+          case ${1#./} in "$PKG"-[0-9]*) ;; *) echo "unexpected package file name: $1"; exit 1 ;; esac
+          {
+            echo "### $PKG"
+            echo
+            echo '```'
+            pacman -Qip "$1" | grep -E '^(Name|Version|Installed Size|Depends On)'
+            echo '```'
+            echo
+            echo "namcap (informational):"
+            echo
+            echo '```'
+            namcap PKGBUILD "$1" || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          pacman -Qlp "$1"

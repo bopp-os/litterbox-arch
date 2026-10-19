@@ -171,6 +171,11 @@ sh tests/run.sh export scan  # chosen suites
 
 Needs `sh`, `bash`, `tar`, `awk`, `sed`, `jq`, `curl` (network), `script` (util-linux); `shellcheck` is optional.
 
+`.github/workflows/ci.yml` runs this on every push to `main` and every pull request, then does a real `makepkg` build of each package in an Arch
+container and checks that exactly one package file comes out. Nothing is published from there. The `litterbox-sandbox` build compiles Litterbox
+(about 15 minutes), so it runs only when `litterbox-sandbox/`, `locks/` or the workflow changed (always on a manual run). Pull requests opened by the
+update workflow use `GITHUB_TOKEN` and do not trigger it, so it is not a required check.
+
 ## Status
 
 Tested with stub `podman`, `gnome-keyring`, `xdg-mime`, `osv-scanner` and `gh`, with a fake container filesystem, with upstream's real

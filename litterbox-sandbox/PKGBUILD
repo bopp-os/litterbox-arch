@@ -8,6 +8,7 @@ url="https://litterbox.work"
 license=('Apache-2.0')
 depends=('coreutils' 'gcc-libs' 'glibc' 'podman')
 makedepends=('rust' 'rust-musl')
+options=('!debug')
 # The SSH confirmation pop-up (egui) dlopen()s these at runtime, so they are not linked
 optdepends=(
   'sudo: device passthrough (litterbox device)'

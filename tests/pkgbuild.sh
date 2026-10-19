@@ -94,4 +94,9 @@ for pkg in litterbox-sandbox litterbox-sandbox-addons; do
     || { echo "--- expected"; echo "$expected"; echo "--- actual"; echo "$actual"; fail "$pkg/ has files outside PKGBUILD + sources"; }
 done
 
+# No -debug split package: makepkg would produce a second package file and the release would carry it.
+# (The addons package is arch=any and has no binaries, so it never gets one.)
+bash -c 'source "$1/litterbox-sandbox/PKGBUILD"; case " ${options[*]-} " in *" !debug "*) exit 0 ;; *) exit 1 ;; esac' _ "$ROOT" \
+  && ok "litterbox-sandbox sets options=('!debug')" || fail "litterbox-sandbox/PKGBUILD does not set options=('!debug')"
+
 [ "$FAILED" = 0 ] && echo "ALL PASSED" || { echo "SOME FAILED"; exit 1; }
