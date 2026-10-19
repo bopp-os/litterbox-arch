@@ -27,6 +27,7 @@ usage() {
 Usage: litterbox-export <name> --app <app> [--boxed | --wrap CMD] [--scheme SCHEME]... [--url-handler] [--delete]
        litterbox-export <name> --bin <command> [--export-path DIR] [--boxed | --wrap CMD] [--delete]
        litterbox-export <name> --list
+       litterbox-export <name> --shell [--delete]
        litterbox-export <name> --exec [--tty] -- <command> [args...]
 
   --app <app>         Add <app> from the Litterbox <name> to the host application menu.
@@ -42,6 +43,8 @@ Usage: litterbox-export <name> --app <app> [--boxed | --wrap CMD] [--scheme SCHE
                       file, ...) are never registered.
   --delete            Remove what was exported (needs no running Litterbox)
   --list              Show what is exported from <name>
+  --shell             Add a menu entry that opens a terminal inside <name> (the generate-entry
+                      equivalent). Remove it with --shell --delete.
   --exec [--tty] --   Run <command> in the Litterbox with every argument quoted safely. This is what
                       exported launchers call; --tty adds --tty/--interactive for terminal programs.
                       Arguments containing a backslash or a newline are refused.
@@ -73,7 +76,7 @@ mode=''; target=''; bin_dir="${HOME}/.local/bin"; wrap=''; delete=0
 url_handler=0; extra_schemes=''; tty=0
 
 set_mode() {
-  [ -z "$mode" ] || die "use only one of --app, --bin, --list, --exec"
+  [ -z "$mode" ] || die "use only one of --app, --bin, --list, --shell, --exec"
   mode=$1; target=$2
 }
 
@@ -99,6 +102,7 @@ while [ $# -gt 0 ]; do
       shift 2 ;;
     --list) set_mode list ''; shift ;;
     --exec) set_mode exec ''; shift ;;
+    --shell) set_mode shell ''; shift ;;
     --tty) tty=1; shift ;;
     --) shift; break ;;   # everything after is the command for --exec
     --boxed) wrap=boxed-run; shift ;;
@@ -120,6 +124,7 @@ else
   [ "$tty" = 0 ] || die "--tty only applies to --exec"
 fi
 if [ -n "$wrap" ]; then valid_token "$wrap" || die "invalid --wrap value '$wrap'"; fi
+if [ "$mode" = shell ] && [ -n "$wrap" ]; then die "--wrap and --boxed do not apply to --shell"; fi
 if [ "$mode" != app ] && { [ "$url_handler" = 1 ] || [ -n "$extra_schemes" ]; }; then
   die "--scheme and --url-handler only apply to --app"
 fi
@@ -454,6 +459,51 @@ delete_app() {
   echo "Removed $f"
 }
 
+# --- terminal entry ------------------------------------------------------------------------------------------
+SHELL_ID=_shell
+
+export_shell() {
+  out="$APP_DIR/litterbox-$name-$SHELL_ID.desktop"
+  if [ -e "$out" ] && ! grep -qxF "$MARK=$name" "$out"; then
+    die "$out exists and was not created by litterbox-export"
+  fi
+  mkdir -p "$APP_DIR"
+  tmp=$(mktemp "$APP_DIR/.litterbox-export.XXXXXX")
+  trap 'rm -f "$tmp"' EXIT
+  {
+    echo '[Desktop Entry]'
+    echo 'Type=Application'
+    echo "Name=Litterbox shell: $name"
+    echo "Comment=Terminal inside the Litterbox $name"
+    echo 'Icon=utilities-terminal'
+    echo 'Categories=System;TerminalEmulator;'
+    # `litterbox enter` with no command opens the login shell with a tty on its own. $name is validated.
+    echo "Exec=$LITTERBOX enter $name"
+    echo 'Terminal=true'
+    echo "$MARK=$name"
+    echo 'X-Litterbox-Source=@shell'
+  } > "$tmp"
+  chmod 644 "$tmp"
+  mv "$tmp" "$out"
+  trap - EXIT
+  if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "$APP_DIR" >/dev/null 2>&1 || true
+  fi
+  echo "Added a terminal entry for '$name': $out"
+}
+
+delete_shell() {
+  out="$APP_DIR/litterbox-$name-$SHELL_ID.desktop"
+  if [ ! -f "$out" ] || ! grep -qxF "$MARK=$name" "$out"; then
+    die "no terminal entry exported for '$name'"
+  fi
+  rm -f "$out"
+  if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "$APP_DIR" >/dev/null 2>&1 || true
+  fi
+  echo "Removed $out"
+}
+
 # --- binaries ------------------------------------------------------------------------------------
 export_bin() {
   valid_token "$target" || die "invalid command '$target'"
@@ -498,13 +548,15 @@ list_exports() {
   found=0
   for f in "$APP_DIR"/litterbox-"$name"-*.desktop; do
     if [ -f "$f" ] && grep -qxF "$MARK=$name" "$f"; then
-      printf 'app  %-30s %s\n' "$(de_get Name < "$f")" "$f"
+      kind=app
+      if [ "$(de_get X-Litterbox-Source < "$f")" = @shell ]; then kind=shell; fi
+      printf '%-6s %-30s %s\n' "$kind" "$(de_get Name < "$f")" "$f"
       found=1
     fi
   done
   for f in "$bin_dir"/*; do
     if [ -f "$f" ] && grep -qxF "$BIN_MARK $name" "$f" 2>/dev/null; then
-      printf 'bin  %-30s %s\n' "$(basename "$f")" "$f"
+      printf '%-6s %-30s %s\n' bin "$(basename "$f")" "$f"
       found=1
     fi
   done
@@ -516,7 +568,9 @@ case "$mode:$delete" in
   app:1) delete_app ;;
   bin:0) export_bin ;;
   bin:1) delete_bin ;;
+  shell:0) export_shell ;;
+  shell:1) delete_shell ;;
   list:0) list_exports ;;
   exec:0) run_exec "$@" ;;
-  list:1) die "--delete needs --app or --bin" ;;
+  list:1) die "--delete needs --app, --bin or --shell" ;;
 esac

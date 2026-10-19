@@ -84,6 +84,9 @@ done
 line=''
 for a in "$@"; do line="$line $a"; done
 printf 'enter %s%s\n' "$name" "$tty"
+if [ "${CONTAINER_SHELL:-sh}" = fish ]; then
+  exec "$FISH" -l -c "printf '%s\\n' $line"
+fi
 sh -c "set -- $line; for w in \"\$@\"; do printf '%s\\n' \"\$w\"; done"
 EOF
 chmod +x "$W/bin/"*
@@ -166,8 +169,9 @@ check_args() { # check_args DESCRIPTION ARG...
   desc=$1; shift
   want="enter dev|cmd"; for a in "$@"; do want="$want|$a"; done; want="$want|"
   got=$($X dev --exec -- cmd "$@" 2>&1 | tr '\n' '|')
-  [ "$got" = "$want" ] && ok "--exec keeps $desc intact" || { echo "want: $want"; echo "got:  $got"; fail "--exec mangled $desc"; }
+  [ "$got" = "$want" ] && ok "--exec keeps $desc intact (${CONTAINER_SHELL:-sh})" || { echo "want: $want"; echo "got:  $got"; fail "--exec mangled $desc (${CONTAINER_SHELL:-sh})"; }
 }
+args_matrix() {
 check_args "spaces" 'a b'
 check_args "single quotes" "it's" "a'b'c"
 check_args "double quotes" 'say "hi"'
@@ -177,7 +181,20 @@ check_args "semicolons and ampersands" "x;touch $PWN" "x&touch $PWN" 'a|b' 'a&&b
 check_args "globs, tilde, hash, bang" '*' '~' '#c' '!!' '$HOME'
 check_args "an OAuth-style callback URL" 'claude://login/callback?code=1&state=2%203#frag'
 check_args "empty and option-like arguments" '' '-n' '--k=v with space'
-[ ! -e "$PWN" ] && ok "no argument was ever executed by the container shell" || fail "an argument was executed"
+check_args "redirects, parens, brackets, braces" '>out' '<in' '2>&1' '(x)' '[a]' '{a,b}' '%self'
+[ ! -e "$PWN" ] && ok "no argument was ever executed by the container shell (${CONTAINER_SHELL:-sh})" || fail "an argument was executed (${CONTAINER_SHELL:-sh})"
+rm -f "$PWN"
+}
+args_matrix
+# Every default Litterbox template makes fish the login shell, so check the same matrix against real fish too.
+FISH=${FISH:-$(command -v fish || true)}
+if [ -n "$FISH" ] && [ -x "$FISH" ]; then
+  export FISH CONTAINER_SHELL=fish
+  args_matrix
+  unset CONTAINER_SHELL
+else
+  echo "SKIP: no fish available (set FISH=/path/to/fish): the fish login shell was not exercised"
+fi
 
 out=$($X dev --exec -- cmd 'a\b' 2>&1); rc=$?
 [ "$rc" != 0 ] && echo "$out" | grep -q 'backslash' && ! echo "$out" | grep -q '^enter dev' && ok "an argument with a backslash is refused, nothing is run" || { echo "$out"; fail "backslash"; }
@@ -201,7 +218,7 @@ launched=$(for t in "$@"; do [ "$t" = %F ] && printf '%s\0' "$hostile" || printf
 
 # --- list ----------------------------------------------------------------------------------------------
 lst=$($X dev --list --export-path "$BO")
-echo "$lst" | grep -q '^app  VSCodium (dev)' && echo "$lst" | grep -q '^bin  codium' && ok "--list shows apps and bins" || { echo "$lst"; fail "list"; }
+echo "$lst" | grep -q '^app  *VSCodium (dev)' && echo "$lst" | grep -q '^bin  *codium' && ok "--list shows apps and bins" || { echo "$lst"; fail "list"; }
 
 # --- delete ------------------------------------------------------------------------------------------------
 $X dev --app codium --delete >/dev/null 2>&1
@@ -215,5 +232,27 @@ $X dev --app fake --delete >/dev/null 2>&1; [ "$(cat "$APPS/litterbox-dev-fake.d
 $X dev --bin codium --export-path "$BO" --delete >/dev/null 2>&1; [ ! -e "$BO/codium" ] && ok "--delete --bin removes the wrapper" || fail "delete bin"
 $X dev --bin git --export-path "$BO" --delete >/dev/null 2>&1; grep -q 'real git' "$BO/git" && ok "--delete --bin refuses a file it did not create" || fail "delete foreign bin"
 $X dev --delete >/dev/null 2>&1 && fail "--delete without target accepted" || ok "--delete without --app/--bin rejected"
+
+
+# --- --shell: a menu entry that opens a terminal inside the Litterbox -------------------------------------------------
+LBPATH="$W/bin/litterbox"
+SH="$APPS/litterbox-dev-_shell.desktop"
+$X dev --shell >/dev/null 2>&1; rc=$?
+[ "$rc" = 0 ] && [ -f "$SH" ] && ok "--shell writes a terminal entry" || fail "--shell rc=$rc"
+has "$SH" "Exec=$LBPATH enter dev" && has "$SH" "Terminal=true" && has "$SH" "Type=Application" && ok "it runs 'litterbox enter dev' in a terminal (no command: the login shell gets a tty)" || { cat "$SH"; fail "shell entry content"; }
+has "$SH" "Name=Litterbox shell: dev" && has "$SH" "Icon=utilities-terminal" && has "$SH" "X-Litterbox-Export=dev" && has "$SH" "X-Litterbox-Source=@shell" && ok "named, iconed and marked as ours" || fail "shell entry metadata"
+sumA=$(sha256sum "$SH" | cut -d' ' -f1); $X dev --shell >/dev/null 2>&1; [ "$sumA" = "$(sha256sum "$SH" | cut -d' ' -f1)" ] && ok "--shell is idempotent" || fail "shell idempotent"
+lst=$($X dev --list --export-path "$BO")
+echo "$lst" | grep -q '^shell  *Litterbox shell: dev' && ok "--list shows it as a shell entry" || { echo "$lst"; fail "list shell"; }
+$X dev --shell --wrap x >/dev/null 2>&1 && fail "--shell with --wrap accepted" || ok "--shell rejects --wrap/--boxed"
+$X dev --shell --boxed >/dev/null 2>&1 && fail "--shell with --boxed accepted" || ok "--shell rejects --boxed"
+$X dev --shell --app codium >/dev/null 2>&1 && fail "--shell with --app accepted" || ok "--shell cannot be combined with another mode"
+$X dev --shell --url-handler >/dev/null 2>&1 && fail "--shell with --url-handler accepted" || ok "--shell rejects --url-handler"
+$X '../x' --shell >/dev/null 2>&1 && fail "bad name accepted for --shell" || ok "--shell validates the Litterbox name"
+printf 'mine\n' > "$APPS/litterbox-other-_shell.desktop"
+$X other --shell >/dev/null 2>&1 && fail "--shell overwrote a foreign file" || { [ "$(cat "$APPS/litterbox-other-_shell.desktop")" = mine ] && ok "--shell never overwrites a file it did not create"; }
+$X other --shell --delete >/dev/null 2>&1 && fail "--shell --delete removed a foreign file" || { [ "$(cat "$APPS/litterbox-other-_shell.desktop")" = mine ] && ok "--shell --delete never removes a file it did not create"; }
+$X dev --shell --delete >/dev/null 2>&1; [ ! -e "$SH" ] && ok "--shell --delete removes the entry" || fail "shell delete"
+$X dev --shell --delete >/dev/null 2>&1 && fail "second --shell --delete succeeded" || ok "deleting a missing terminal entry fails clearly"
 
 [ "$FAILED" = 0 ] && echo "ALL PASSED" || { echo "SOME FAILED"; exit 1; }

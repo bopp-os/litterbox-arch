@@ -13,7 +13,8 @@ ok() { echo "PASS: $*"; }
 fail() { echo "FAIL: $*"; FAILED=1; }
 
 BIN="$W/bin"; FIX="$W/container-path"; OSREL="$W/os-release"; PM_LOG="$W/pm.log"; LBXLOG="$W/litterbox.log"
-mkdir -p "$BIN" "$FIX" "$W/home/Litterbox/definitions"
+mkdir -p "$BIN" "$FIX" "$W/home/Litterbox/definitions" "$W/fishhome"
+FISH_HOME="$W/fishhome"; export FISH_HOME
 ln -s "$(command -v grep)" "$FIX/grep"
 ln -s /bin/sh "$FIX/sh"        # a real container has sh on its PATH
 
@@ -34,6 +35,9 @@ done
 line=''
 for a in "$@"; do line="$line $a"; done          # joined with single spaces, no quoting
 line=$(printf '%s' "$line" | sed "s|/etc/os-release|$OSREL|g")
+if [ "${CONTAINER_SHELL:-sh}" = fish ]; then
+  exec env -i PATH="$FIX" HOME="$FISH_HOME" PM_LOG="$PM_LOG" FAKE_PM_RC="${FAKE_PM_RC:-}" FAKE_PACMAN_SANDBOX="${FAKE_PACMAN_SANDBOX:-}" "$FISH" -l -c "$line"
+fi
 exec env -i PATH="$FIX" PM_LOG="$PM_LOG" FAKE_PM_RC="${FAKE_PM_RC:-}" FAKE_PACMAN_SANDBOX="${FAKE_PACMAN_SANDBOX:-}" /bin/sh -c "$line"
 EOF
 chmod +x "$BIN/litterbox"
@@ -175,11 +179,24 @@ if grep -q '\\' "$W/all-calls.log"; then fail "a backslash was sent to the conta
 bad=$(grep -E "^litterbox enter dev --root -- " "$W/all-calls.log" | grep -v -E "^litterbox enter dev --root -- sh -c '[^']*'\$" || true)
 [ -z "$bad" ] && ok "every call is exactly: sh -c '<script without quotes>'" || { echo "$bad"; fail "call shape"; }
 
-if command -v fish >/dev/null 2>&1; then
-  line=$(grep -m1 "^litterbox enter dev --root -- sh -c 'pacman" "$W/all-calls.log" | sed 's/^litterbox enter dev --root -- //')
-  if fish -c "set x (string split ' ' -- $line); true" >/dev/null 2>&1; then ok "fish parses the command line"; else fail "fish rejected the command line"; fi
+# Every default Litterbox template makes fish the login shell, so run the key families through real fish too.
+FISH=${FISH:-$(command -v fish || true)}
+if [ -n "$FISH" ] && [ -x "$FISH" ]; then
+  export FISH
+  container "$OS_CACHY" pacman; EXTRA=CONTAINER_SHELL=fish; run_update dev
+  [ "$rc" = 0 ] && pm_log_is "pacman -Syu --noconfirm" && ok "fish login shell: Arch family (pacman)" || { echo "$out"; fail "fish pacman"; }
+  container 'ID=ubuntu' apt-get; EXTRA=CONTAINER_SHELL=fish; run_update dev
+  [ "$rc" = 0 ] && [ "$(cat "$PM_LOG")" = "apt-get update DEBIAN_FRONTEND=noninteractive
+apt-get -y upgrade DEBIAN_FRONTEND=noninteractive" ] && ok "fish login shell: Debian family (export; a && b)" || { echo "$out"; cat "$PM_LOG"; fail "fish apt"; }
+  container 'ID=fedora' dnf; EXTRA=CONTAINER_SHELL=fish; run_update dev
+  [ "$rc" = 0 ] && pm_log_is "dnf -y upgrade --refresh" && ok "fish login shell: Fedora family (dnf)" || { echo "$out"; fail "fish dnf"; }
+  container 'ID=opensuse-tumbleweed' zypper; EXTRA=CONTAINER_SHELL=fish; run_update dev
+  [ "$rc" = 0 ] && [ "$(cat "$PM_LOG")" = "zypper --non-interactive refresh
+zypper --non-interactive dup" ] && ok "fish login shell: openSUSE (a && b)" || { echo "$out"; cat "$PM_LOG"; fail "fish zypper"; }
+  container 'ID=weirdos' pacman; EXTRA=CONTAINER_SHELL=fish; run_update --no-sandbox dev
+  [ "$rc" = 1 ] && echo "$out" | grep -q 'no --disable-sandbox option' && ok "fish login shell: the probe itself ran under fish and reported what pacman supports" || { echo "$out"; fail "fish probe"; }
 else
-  echo "SKIP: fish is not installed here, so the fish dialect was not exercised"
+  echo "SKIP: no fish available (set FISH=/path/to/fish): the fish login shell was not exercised"
 fi
 
 [ "$FAILED" = 0 ] && echo "ALL PASSED" || { echo "SOME FAILED"; exit 1; }

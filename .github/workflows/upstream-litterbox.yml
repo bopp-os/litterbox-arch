@@ -52,7 +52,7 @@ jobs:
       build: ${{ steps.build.outcome }}
     steps:
       - name: Install tools
-        run: pacman -Syu --noconfirm --needed base-devel git jq osv-scanner namcap shellcheck
+        run: pacman -Syu --noconfirm --needed base-devel git jq osv-scanner namcap shellcheck fish
 
       - uses: actions/checkout@v7
         with:

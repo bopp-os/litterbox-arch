@@ -1,0 +1,109 @@
+#!/bin/sh
+# litterbox-prune - remove the old images that `litterbox build` leaves behind.
+#
+# Rebuilding a Litterbox moves its image tag to the new image and leaves the previous one dangling (upstream's
+# own comment in get_image: "Avoid dangling images that are left behind when an image gets rebuilt"). Those
+# images keep the work.litterbox.name label, so this lists exactly them: label present AND dangling.
+#
+# Safe by design: it only LISTS unless you pass --yes, it never uses --force (an image that a container still
+# uses is simply kept), it never touches an image that still has a tag (the current image of each Litterbox),
+# and unlabelled build-cache layers are left alone so rebuilds stay fast.
+set -eu
+
+LABEL=work.litterbox.name
+
+die() { echo "litterbox-prune: $*" >&2; exit 1; }
+
+usage() {
+  cat <<EOF
+Usage: litterbox-prune [--yes] [name...]
+
+Lists the dangling images left behind by rebuilding Litterboxes (all of them, or only the named ones).
+With --yes it removes them. Images still used by a container are kept and reported.
+
+  -y, --yes    Actually remove the images (without it nothing is changed)
+  -h, --help   This text
+EOF
+}
+
+valid_name() {
+  case $1 in
+    ''|*[!A-Za-z0-9._-]*|.*) return 1 ;;
+  esac
+}
+
+yes=0; names=''
+while [ $# -gt 0 ]; do
+  case $1 in
+    -y|--yes) yes=1 ;;
+    -h|--help) usage; exit 0 ;;
+    -*) die "unknown option '$1'" ;;
+    *) valid_name "$1" || die "invalid Litterbox name '$1'"; names="$names $1" ;;
+  esac
+  shift
+done
+
+command -v podman >/dev/null 2>&1 || die "podman is not installed or not on PATH"
+
+# One label filter per requested name, or a single "has the label" filter for all Litterboxes.
+filters=''
+if [ -n "$names" ]; then
+  for n in $names; do filters="$filters $LABEL=$n"; done
+else
+  filters=" $LABEL"
+fi
+
+ids=''
+for f in $filters; do
+  found=$(podman image ls --all --filter "label=$f" --filter dangling=true --format '{{.ID}}') \
+    || die "podman could not list images"
+  ids="$ids $found"
+done
+
+# Only plain hex IDs are acted on; anything else is reported and ignored.
+clean_ids=''
+for id in $ids; do
+  if printf '%s\n' "$id" | grep -Eq '^[0-9a-f]{6,64}$'; then
+    case " $clean_ids " in *" $id "*) ;; *) clean_ids="$clean_ids $id" ;; esac
+  else
+    echo "litterbox-prune: ignoring unexpected image id '$id'" >&2
+  fi
+done
+
+if [ -z "$clean_ids" ]; then
+  echo "No dangling Litterbox images."
+  exit 0
+fi
+
+count=0
+for id in $clean_ids; do count=$((count + 1)); done
+
+echo "Dangling Litterbox images (left behind by rebuilds):"
+for f in $filters; do
+  podman image ls --all --filter "label=$f" --filter dangling=true || true
+done
+echo "$count image(s)."
+
+if [ "$yes" = 0 ]; then
+  echo "Nothing was removed. Run again with --yes to remove them."
+  exit 0
+fi
+
+err=$(mktemp)
+trap 'rm -f "$err"' EXIT
+removed=0; kept=0
+for id in $clean_ids; do
+  if podman image rm "$id" >/dev/null 2>"$err"; then
+    echo "removed $id"
+    removed=$((removed + 1))
+  else
+    echo "kept    $id ($(head -n 1 "$err" | cut -c1-120))"
+    kept=$((kept + 1))
+  fi
+done
+
+echo "Removed $removed, kept $kept."
+if [ "$kept" -gt 0 ]; then
+  echo "litterbox-prune: $kept image(s) could not be removed (usually still used by a container)." >&2
+  exit 1
+fi

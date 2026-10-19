@@ -1,0 +1,338 @@
+#!/bin/sh
+# litterbox-assemble - generate a Litterbox definition (Dockerfile + settings) from a template, a package
+# list, addons and settings, so a new sandbox is one command (or one section in a manifest file).
+#
+# It only writes ~/Litterbox/definitions/<name>.Dockerfile and <name>.ron; it never builds anything unless
+# you pass --build. The Dockerfile is upstream Litterbox's own template for the installed version (shipped by
+# the litterbox-sandbox package) plus a marked block that installs your packages, plus the addon block from
+# litterbox-addon. Every value is validated before it goes into a file, and all boxes of a manifest are
+# generated in a staging directory first, so a mistake in one section writes nothing at all.
+set -eu
+
+LBX_ROOT="${LITTERBOX_ROOT:-${HOME:?HOME is not set}/Litterbox}"
+TEMPLATE_DIR="${LITTERBOX_TEMPLATE_DIR:-/usr/share/litterbox-sandbox/templates}"
+PKG_BEGIN='# >>> litterbox-assemble packages >>>'
+PKG_END='# <<< litterbox-assemble packages <<<'
+
+BOOL_KEYS='support_ping support_tuntap packet_forwarding expose_pipewire keep_groups enable_kvm expose_kfd unconfine_seccomp unconfine_landlock'
+
+die() { echo "litterbox-assemble: $*" >&2; exit 1; }
+
+usage() {
+  cat <<EOF
+Usage: litterbox-assemble [options] <name>
+       litterbox-assemble [options] --file FILE [name...]
+       litterbox-assemble --list-templates
+
+Creates ~/Litterbox/definitions/<name>.Dockerfile and <name>.ron. Then run: litterbox build <name>
+(when it asks whether to change the settings, answer No to keep the generated ones).
+
+Options:
+  -t, --template T    cachyos (default), fedora, tumbleweed or ubuntu-latest
+  -p, --package PKG   Extra package to install in the image (repeatable; a quoted list also works)
+  -a, --addon NAME    Add a litterbox-addon addon, e.g. boxed-run (Arch/CachyOS templates only)
+  -s, --set KEY=VAL   A setting for <name>.ron (repeatable). All default to the most isolated value.
+                        $BOOL_KEYS : true | false
+                        shm_size_gb      : a number of GB, or none
+                        network_mode     : Pasta | PastaHostToContainer | PastaContainerToHost |
+                                           PastaBidirectional | Host
+                      (custom_podman_args can add arbitrary podman flags, so it is not accepted here)
+  -f, --file FILE     Read one or more boxes from a manifest; with names, only those sections
+      --replace       Overwrite an existing definition (otherwise it is refused, like litterbox define)
+  -n, --dry-run       Show what would be written and write nothing
+      --build         Run 'litterbox build <name>' for each box afterwards (interactive)
+      --list-templates  Show the templates this Litterbox installation ships
+
+Manifest format ('#' starts a comment):
+
+  [web]
+  template = cachyos
+  packages = git neovim ripgrep
+  addons   = boxed-run
+  set.expose_pipewire = true
+  set.network_mode    = Pasta
+EOF
+}
+
+valid_name() {
+  case $1 in
+    ''|*[!A-Za-z0-9._-]*|.*) return 1 ;;
+  esac
+}
+valid_pkg() { printf '%s\n' "$1" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9@._+:-]*$'; }
+
+template_family() {
+  case $1 in
+    cachyos) echo arch ;;
+    fedora) echo fedora ;;
+    tumbleweed) echo suse ;;
+    ubuntu-latest) echo debian ;;
+    *) return 1 ;;
+  esac
+}
+install_cmd() {
+  case $1 in
+    arch) echo "pacman -S --noconfirm --needed" ;;
+    debian) echo "DEBIAN_FRONTEND=noninteractive apt-get install -y" ;;
+    fedora) echo "dnf install -y" ;;
+    suse) echo "zypper in -y" ;;
+  esac
+}
+
+# --- arguments --------------------------------------------------------------------------------------------
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+SPEC="$tmp/spec"; STAGE="$tmp/root"; mkdir -p "$SPEC" "$STAGE/definitions"
+
+# add_spec NAME KEY VALUE WHERE: validate one setting of a box and append it to the box's spec file
+add_spec() {
+  s_name=$1; s_key=$2; s_val=$3; s_where=$4; s_file="$SPEC/$s_name"
+  case $s_key in
+    template)
+      printf '%s\n' "$s_val" | grep -Eq '^[a-z0-9-]+$' || die "$s_where: invalid template '$s_val'"
+      template_family "$s_val" >/dev/null || die "$s_where: unknown template '$s_val' (see --list-templates)"
+      if grep -q '^template=' "$s_file"; then die "$s_where: template given twice for '$s_name'"; fi
+      echo "template=$s_val" >> "$s_file" ;;
+    packages)
+      for p in $s_val; do
+        valid_pkg "$p" || die "$s_where: invalid package name '$p'"
+        echo "package=$p" >> "$s_file"
+      done ;;
+    addons)
+      for a in $s_val; do
+        valid_name "$a" || die "$s_where: invalid addon name '$a'"
+        echo "addon=$a" >> "$s_file"
+      done ;;
+    set.*)
+      k=${s_key#set.}
+      case $k in
+        support_ping|support_tuntap|packet_forwarding|expose_pipewire|keep_groups|enable_kvm|expose_kfd|unconfine_seccomp|unconfine_landlock)
+          case $s_val in true|false) ;; *) die "$s_where: $k must be true or false" ;; esac ;;
+        shm_size_gb)
+          case $s_val in
+            none) ;;
+            ''|*[!0-9]*) die "$s_where: shm_size_gb must be a number of GB or none" ;;
+            *) if [ "${#s_val}" -gt 4 ] || [ "$s_val" -lt 1 ] || [ "$s_val" -gt 1024 ]; then die "$s_where: shm_size_gb must be between 1 and 1024"; fi ;;
+          esac ;;
+        network_mode)
+          case $s_val in Pasta|PastaHostToContainer|PastaContainerToHost|PastaBidirectional|Host) ;;
+            *) die "$s_where: network_mode must be Pasta, PastaHostToContainer, PastaContainerToHost, PastaBidirectional or Host" ;; esac ;;
+        custom_podman_args) die "$s_where: custom_podman_args is not accepted here because it can add arbitrary podman flags; edit $s_name.ron by hand if you really need it" ;;
+        *) die "$s_where: unknown setting '$k'" ;;
+      esac
+      echo "set=$k=$s_val" >> "$s_file" ;;
+    *) die "$s_where: unknown key '$s_key'" ;;
+  esac
+}
+
+mode=flags; file=''; names=''; replace=0; dry_run=0; do_build=0; list_templates=0
+flag_template=''; flag_packages=''; flag_addons=''; flag_sets=''
+while [ $# -gt 0 ]; do
+  case $1 in
+    -t|--template) [ $# -ge 2 ] || die "$1 needs a value"; flag_template=$2; shift ;;
+    -p|--package) [ $# -ge 2 ] || die "$1 needs a value"; flag_packages="$flag_packages $2"; shift ;;
+    -a|--addon) [ $# -ge 2 ] || die "$1 needs a value"; flag_addons="$flag_addons $2"; shift ;;
+    -s|--set) [ $# -ge 2 ] || die "$1 needs KEY=VALUE"
+      case $2 in *=*) ;; *) die "--set needs KEY=VALUE, got '$2'" ;; esac
+      flag_sets="$flag_sets
+${2%%=*}=${2#*=}"
+      shift ;;
+    -f|--file) [ $# -ge 2 ] || die "$1 needs a file"; mode=manifest; file=$2; shift ;;
+    --replace) replace=1 ;;
+    -n|--dry-run) dry_run=1 ;;
+    --build) do_build=1 ;;
+    --list-templates) list_templates=1 ;;
+    -h|--help) usage; exit 0 ;;
+    -*) die "unknown option '$1'" ;;
+    *) valid_name "$1" || die "invalid Litterbox name '$1'"; names="$names $1" ;;
+  esac
+  shift
+done
+
+if [ "$list_templates" = 1 ]; then
+  [ -d "$TEMPLATE_DIR" ] || die "no templates found in $TEMPLATE_DIR (is litterbox-sandbox installed?)"
+  for f in "$TEMPLATE_DIR"/*.Dockerfile; do
+    [ -f "$f" ] || continue
+    t=$(basename "$f" .Dockerfile)
+    if fam=$(template_family "$t"); then echo "$t ($fam family, $(install_cmd "$fam" | cut -d' ' -f1-3))"; else echo "$t (not supported by litterbox-assemble)"; fi
+  done
+  exit 0
+fi
+[ -d "$TEMPLATE_DIR" ] || die "no templates found in $TEMPLATE_DIR (is litterbox-sandbox installed?)"
+
+# --- build the list of boxes (spec files) -------------------------------------------------------------------
+order=''
+if [ "$mode" = flags ]; then
+  # shellcheck disable=SC2086 # $names holds validated Litterbox names
+  set -- $names
+  [ $# -eq 1 ] || { usage >&2; exit 1; }
+  box=$1
+  : > "$SPEC/$box"; order=" $box"
+  add_spec "$box" template "${flag_template:-cachyos}" "--template"
+  [ -z "$flag_packages" ] || add_spec "$box" packages "$flag_packages" "--package"
+  [ -z "$flag_addons" ] || add_spec "$box" addons "$flag_addons" "--addon"
+  while IFS= read -r kv; do
+    [ -n "$kv" ] || continue
+    add_spec "$box" "set.${kv%%=*}" "${kv#*=}" "--set"
+  done <<EOF
+$flag_sets
+EOF
+else
+  [ -z "$flag_template$flag_packages$flag_addons$flag_sets" ] || die "--template, --package, --addon and --set are for single boxes; put them in the manifest instead"
+  [ -f "$file" ] || die "manifest '$file' not found"
+  cur=''; lineno=0
+  while IFS= read -r raw || [ -n "$raw" ]; do
+    lineno=$((lineno + 1))
+    line=$(printf '%s' "$raw" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    case $line in ''|'#'*|';'*) continue ;; esac
+    case $line in
+      '['*']')
+        sec=${line#\[}; sec=${sec%\]}
+        valid_name "$sec" || die "$file:$lineno: invalid Litterbox name '$sec'"
+        if [ -e "$SPEC/$sec" ]; then die "$file:$lineno: [$sec] appears twice"; fi
+        : > "$SPEC/$sec"; cur=$sec; order="$order $sec" ;;
+      *=*)
+        [ -n "$cur" ] || die "$file:$lineno: setting outside of a [section]"
+        key=$(printf '%s' "${line%%=*}" | sed 's/[[:space:]]*$//')
+        val=$(printf '%s' "${line#*=}" | sed 's/^[[:space:]]*//')
+        add_spec "$cur" "$key" "$val" "$file:$lineno" ;;
+      *) die "$file:$lineno: cannot parse '$line'" ;;
+    esac
+  done < "$file"
+  [ -n "$order" ] || die "$file has no [sections]"
+  if [ -n "$names" ]; then
+    for n in $names; do
+      case "$order " in *" $n "*) ;; *) die "$file has no section [$n]" ;; esac
+    done
+    order=$names
+  fi
+fi
+
+# --- generate each box into the staging area ---------------------------------------------------------------
+spec_get() { grep "^$2=" "$SPEC/$1" 2>/dev/null | sed "s/^$2=//" || true; }
+setting() { # setting NAME KEY DEFAULT: the last --set for KEY, else DEFAULT
+  v=$(grep "^set=$2=" "$SPEC/$1" | tail -n 1 | sed "s/^set=$2=//" || true)
+  if [ -n "$v" ]; then printf '%s' "$v"; else printf '%s' "$3"; fi
+}
+
+find_addon_tool() {
+  if [ -n "${LITTERBOX_ADDON:-}" ]; then printf '%s' "$LITTERBOX_ADDON"; return; fi
+  d=$(cd "$(dirname "$0")" && pwd)
+  if [ -x "$d/litterbox-addon" ]; then printf '%s' "$d/litterbox-addon"; return; fi
+  command -v litterbox-addon || true
+}
+
+stage_box() {
+  box=$1
+  def="$STAGE/definitions/$box.Dockerfile"; ron="$STAGE/definitions/$box.ron"
+  tpl=$(spec_get "$box" template); [ -n "$tpl" ] || tpl=cachyos
+  [ -f "$TEMPLATE_DIR/$tpl.Dockerfile" ] || die "[$box] template '$tpl' is not installed in $TEMPLATE_DIR"
+  fam=$(template_family "$tpl")
+
+  if [ "$replace" = 0 ]; then
+    for f in "$LBX_ROOT/definitions/$box.Dockerfile" "$LBX_ROOT/definitions/$box.ron"; do
+      if [ -e "$f" ]; then die "$f already exists (use --replace to overwrite it)"; fi
+    done
+  elif grep -q 'custom_podman_args: Some(' "$LBX_ROOT/definitions/$box.ron" 2>/dev/null; then
+    echo "litterbox-assemble: warning: the existing $box.ron has custom_podman_args, which are NOT carried over to the new one" >&2
+  fi
+
+  cp "$TEMPLATE_DIR/$tpl.Dockerfile" "$def"
+  [ -z "$(tail -c1 "$def")" ] || echo >> "$def"
+
+  pkgs=$(spec_get "$box" package | sort -u | tr '\n' ' ' | sed 's/ $//')
+  if [ -n "$pkgs" ]; then
+    {
+      echo "$PKG_BEGIN"
+      echo "# Managed by litterbox-assemble. Edits between these markers are overwritten."
+      echo "RUN $(install_cmd "$fam") $pkgs"
+      echo "$PKG_END"
+    } >> "$def"
+  fi
+
+  addons=$(spec_get "$box" addon | sort -u | tr '\n' ' ' | sed 's/ $//')
+  if [ -n "$addons" ]; then
+    [ "$fam" = arch ] || die "[$box] addons currently work with the cachyos template only (litterbox-addon supports Arch/CachyOS images)"
+    tool=$(find_addon_tool)
+    [ -n "$tool" ] || die "litterbox-addon not found"
+    # shellcheck disable=SC2086 # $addons is a list of validated names
+    LITTERBOX_ROOT="$STAGE" sh "$tool" install "$box" $addons >/dev/null || die "[$box] adding the addons failed"
+  fi
+
+  {
+    echo '('
+    echo '    version: 1,'
+    for k in support_ping support_tuntap packet_forwarding expose_pipewire keep_groups enable_kvm expose_kfd unconfine_seccomp unconfine_landlock; do
+      echo "    $k: $(setting "$box" "$k" false),"
+    done
+    shm=$(setting "$box" shm_size_gb none)
+    if [ "$shm" = none ]; then echo '    shm_size_gb: None,'; else echo "    shm_size_gb: Some($shm),"; fi
+    echo "    network_mode: $(setting "$box" network_mode Pasta),"
+    echo '    custom_podman_args: None,'
+    echo ')'
+  } > "$ron"
+
+  # what widens the sandbox compared with the all-defaults box
+  widen=''
+  for k in $BOOL_KEYS; do
+    if [ "$(setting "$box" "$k" false)" = true ]; then widen="$widen $k"; fi
+  done
+  nm=$(setting "$box" network_mode Pasta)
+  if [ "$nm" != Pasta ]; then widen="$widen network_mode=$nm"; fi
+  printf '%s\n' "$widen" > "$STAGE/$box.widen"
+  printf '%s %s\n' "$tpl" "$fam" > "$STAGE/$box.info"
+}
+
+for box in $order; do stage_box "$box"; done
+
+# --- report, then write -----------------------------------------------------------------------------------------
+host_warnings() { # host_warnings BOX: settings that need something this host does not have
+  box=$1
+  if [ "$(setting "$box" enable_kvm false)" = true ] && [ ! -e /dev/kvm ]; then echo "enable_kvm is on but /dev/kvm does not exist on this host"; fi
+  if [ "$(setting "$box" expose_kfd false)" = true ] && [ ! -e /dev/kfd ]; then echo "expose_kfd is on but /dev/kfd does not exist on this host"; fi
+  if [ "$(setting "$box" expose_pipewire false)" = true ] && [ ! -e "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/pipewire-0" ]; then echo "expose_pipewire is on but no PipeWire socket was found on this host"; fi
+}
+
+written=''
+for box in $order; do
+  read -r tpl fam < "$STAGE/$box.info"
+  npk=$(spec_get "$box" package | sort -u | wc -l | tr -d ' ')
+  adds=$(spec_get "$box" addon | sort -u | tr '\n' ' ' | sed 's/ $//')
+  echo "==> $box: template $tpl ($fam family), $npk extra package(s)${adds:+, addons: $adds}"
+  if [ "$dry_run" = 1 ]; then
+    echo "    --- $box.Dockerfile (template plus the blocks added by this tool) ---"
+    sed -n "/^$PKG_BEGIN\$/,/^$PKG_END\$/p;/^# >>> litterbox-addons >>>\$/,/^# <<< litterbox-addons <<<\$/p" "$STAGE/definitions/$box.Dockerfile" | sed 's/^/    /' | head -n 40
+    echo "    --- $box.ron ---"
+    sed 's/^/    /' "$STAGE/definitions/$box.ron"
+  else
+    mkdir -p "$LBX_ROOT/definitions"
+    for ext in Dockerfile ron; do
+      dest="$LBX_ROOT/definitions/$box.$ext"
+      part=$(mktemp "$dest.XXXXXX")
+      cat "$STAGE/definitions/$box.$ext" > "$part"
+      mv "$part" "$dest"
+      echo "    wrote $dest"
+    done
+    written="$written $box"
+  fi
+  widen=$(cat "$STAGE/$box.widen")
+  if [ -n "$widen" ]; then echo "    Settings that widen what this sandbox can reach:$widen"; fi
+  host_warnings "$box" | while IFS= read -r w; do echo "    warning: $w"; done
+done
+
+if [ "$dry_run" = 1 ]; then
+  echo "Dry run: nothing was written."
+  exit 0
+fi
+
+if [ "$do_build" = 1 ]; then
+  command -v litterbox >/dev/null 2>&1 || die "litterbox is not installed or not on PATH"
+  for box in $written; do
+    echo "==> litterbox build $box (answer No when asked to change the settings)"
+    litterbox build "$box"
+  done
+else
+  for box in $written; do
+    echo "Next: litterbox build $box   (answer No when asked to change the settings, to keep the generated ones)"
+  done
+fi

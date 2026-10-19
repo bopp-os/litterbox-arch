@@ -53,4 +53,7 @@ package() {
   install -Dm755 litterbox/target/release/litterbox "$pkgdir/usr/bin/litterbox"
   install -Dm755 "lbx-init/target/$_musl/release/lbx-init" "$pkgdir/usr/bin/lbx-init"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  # The Dockerfile templates `litterbox define` offers, as plain files: litterbox-assemble starts from these,
+  # so it always matches the installed version.
+  install -Dm644 -t "$pkgdir/usr/share/litterbox-sandbox/templates" litterbox/templates/*.Dockerfile
 }

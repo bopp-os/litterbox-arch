@@ -76,6 +76,43 @@ these fixed commands; it is sanitised and never pasted into a command. Updates a
 restarts but are lost when the Litterbox is rebuilt or deleted, so anything permanent belongs in its Dockerfile. If pacman fails
 with sandbox or Landlock errors inside the container, try `--no-sandbox` (pacman 7+).
 
+**`litterbox-assemble`** (host) generates a Litterbox definition, `~/Litterbox/definitions/<name>.Dockerfile` and `<name>.ron`, from a template, a
+package list, addons and settings, so a new sandbox with your usual tools is one command. It never builds anything unless you add `--build`.
+
+```
+litterbox-assemble web -p git -p neovim -a boxed-run -s expose_pipewire=true
+litterbox build web                       # answer No when asked to change the settings
+litterbox-assemble --dry-run web -p git   # show what would be written, write nothing
+litterbox-assemble --file boxes.conf      # one or many boxes from a manifest; add names to pick some
+litterbox-assemble --list-templates
+```
+
+Manifest format (`#` comments, CRLF fine; the whole file is validated and staged before anything is written, so one bad section writes nothing):
+
+```
+[web]
+template = cachyos            # cachyos (default), fedora, tumbleweed, ubuntu-latest
+packages = git neovim ripgrep
+addons   = boxed-run          # Arch/CachyOS template only, because litterbox-addon is
+set.expose_pipewire = true
+set.network_mode    = Pasta
+```
+
+The Dockerfile is upstream Litterbox's own template for the installed version (the `litterbox-sandbox` package installs them under
+`/usr/share/litterbox-sandbox/templates`) plus a marked block that installs your packages with the template's package manager, plus the
+`litterbox-addon` block. Settings default to the most isolated values; the ones you widen are listed after generation, and any that need
+something this host lacks (`/dev/kvm`, `/dev/kfd`, PipeWire) get a warning. `custom_podman_args` is deliberately not accepted, since it can
+add arbitrary podman flags: edit the `.ron` yourself if you need it. An existing definition is refused unless you pass `--replace`.
+
+**`litterbox-prune`** (host) removes the old images that `litterbox build` leaves behind (upstream's own TODO list asks for a prune command).
+It lists by default and only removes with `--yes`; it never uses `--force`, never touches an image that still has a tag, and keeps any image a
+container still uses. `litterbox-prune dev work` limits it to those Litterboxes.
+
+**`litterbox-export <name> --shell`** adds a menu entry that opens a terminal inside a Litterbox (the `distrobox-generate-entry` equivalent).
+
+**Completions** for bash, fish and zsh cover `litterbox` itself and all the tools above: subcommands, options, your Litterbox names (from
+`~/Litterbox/definitions`), addon names and template names. One file per shell is installed; the other command names are symlinks to it.
+
 ## How updates reach users
 
 ```
@@ -130,10 +167,13 @@ session, or a real `makepkg` run. The first workflow run (`dry_run`) is the firs
 Known unverified points:
 
 * `--tty true --interactive true` (used for terminal apps and interactive `--bin` wrappers) is inferred from Litterbox's argument definitions, not run.
-* Litterbox's join-without-quoting behaviour is read from its source (`lbx-init`), and the tests emulate it with `sh`. Nothing here has
-  been run against the real thing, and the fish dialect (the CachyOS template's shell) was not exercised: the generated commands avoid
-  single quotes and backslashes inside quoted text, which should make bash and fish parse them the same.
+* Litterbox's join-without-quoting behaviour is read from its source (`lbx-init`), and the tests emulate it with `sh` and with real fish
+  (every default template makes fish the login shell). Nothing here has been run against the real Litterbox.
 * `litterbox-update` has not run against a real container: whether pacman's download sandbox works as root inside rootless Podman is untested.
+* The `.ron` that `litterbox-assemble` writes follows the structure of Litterbox's own settings code and is complete, but it has never been fed to a
+  real `litterbox build`. Litterbox rewrites the file in its own format after loading it.
+* The zsh completion file was written without a zsh to test with. bash and fish (real fish 4.9.3) are tested; the fish login-shell quoting
+  checks run when a fish binary is available (`FISH=/path/to/fish sh tests/run.sh`; the update workflow installs fish so CI runs them).
 * `boxed-run` starts a new D-Bus session and keyring daemon on every launch, including for URL-handler launches that only forward a link to a running app.
 * `osv-scanner`'s JSON shape and exit codes are taken from its documentation.
 

@@ -1,0 +1,148 @@
+#compdef litterbox litterbox-addon litterbox-export litterbox-update litterbox-prune litterbox-assemble
+# zsh completion for litterbox and the litterbox-sandbox-addons tools.
+#
+# Litterbox names come from ~/Litterbox/definitions (or $LITTERBOX_ROOT), addon names from
+# /usr/share/litterbox-sandbox-addons (or $LITTERBOX_ADDONS_DIR), templates from
+# /usr/share/litterbox-sandbox/templates (or $LITTERBOX_TEMPLATE_DIR). Only plain names are offered.
+#
+# NOTE: written without a zsh available to test with; bash and fish versions of this are tested.
+
+_litterbox_names() {
+  local root=${LITTERBOX_ROOT:-$HOME/Litterbox} f
+  local -a names
+  for f in $root/definitions/*.Dockerfile(N); do
+    f=${${f:t}%.Dockerfile}
+    [[ $f =~ '^[A-Za-z0-9][A-Za-z0-9._-]*$' ]] && names+=($f)
+  done
+  _describe -t litterboxes 'Litterbox' names
+}
+
+_litterbox_addon_names() {
+  local dir=${LITTERBOX_ADDONS_DIR:-/usr/share/litterbox-sandbox-addons} d
+  local -a names
+  for d in $dir/*(N/); do names+=(${d:t}); done
+  _describe -t addons 'addon' names
+}
+
+_litterbox_template_names() {
+  local dir=${LITTERBOX_TEMPLATE_DIR:-/usr/share/litterbox-sandbox/templates} f
+  local -a names
+  for f in $dir/*.Dockerfile(N); do names+=(${${f:t}%.Dockerfile}); done
+  _describe -t templates 'template' names
+}
+
+_litterbox_settings() {
+  local -a s
+  local k
+  for k in support_ping support_tuntap packet_forwarding expose_pipewire keep_groups enable_kvm expose_kfd unconfine_seccomp unconfine_landlock; do
+    s+=("$k=true" "$k=false")
+  done
+  s+=(network_mode=Pasta network_mode=PastaHostToContainer network_mode=PastaContainerToHost network_mode=PastaBidirectional network_mode=Host shm_size_gb=none)
+  _describe -t settings 'setting' s
+}
+
+_litterbox_main() {
+  local -a cmds=(
+    'define:create a definition from a template'
+    'build:build the image and container'
+    'enter:enter a Litterbox'
+    'delete:delete a Litterbox'
+    'device:attach a device'
+    'list:list Litterboxes'
+    'keys:manage SSH keys'
+  )
+  if (( CURRENT == 2 )); then
+    _describe -t commands 'litterbox command' cmds
+    return
+  fi
+  case $words[2] in
+    build|delete|del|rm)
+      (( CURRENT == 3 )) && _litterbox_names ;;
+    enter)
+      _arguments \
+        '--root[run as root instead of dropping privileges]' \
+        '(-t --tty)'{-t,--tty}'[allocate a pseudo-TTY]:bool:(true false)' \
+        '(-i --interactive)'{-i,--interactive}'[keep STDIN open]:bool:(true false)' \
+        '(-w --workdir)'{-w,--workdir}'[working directory in the container]:directory:_files -/' \
+        '--wait[what to do with background processes]:behaviour:(foreground background kill)' \
+        '1:Litterbox:_litterbox_names' ;;
+    device|dev)
+      (( CURRENT == 3 )) && _litterbox_names ;;
+    keys)
+      if (( CURRENT == 3 )); then
+        local -a sub=(generate attach detach delete import export list print change-password)
+        _describe -t commands 'keys command' sub
+      elif [[ $words[3] == attach ]] && (( CURRENT == 5 )); then
+        _litterbox_names
+      fi ;;
+  esac
+}
+
+_litterbox_addon() {
+  local -a sub=('list:show the available addons' 'install:add addons to a Litterbox definition' 'remove:take the addons out again' 'help:usage')
+  if (( CURRENT == 2 )); then
+    _describe -t commands 'litterbox-addon command' sub
+  elif (( CURRENT == 3 )) && [[ $words[2] == (install|remove) ]]; then
+    _litterbox_names
+  elif [[ $words[2] == install ]]; then
+    _litterbox_addon_names
+  fi
+}
+
+_litterbox_export() {
+  _arguments \
+    '--app[add an app to the menu]:app name: ' \
+    '--bin[create a host command]:command: ' \
+    '--list[show what is exported]' \
+    '--shell[add a menu entry that opens a terminal in the Litterbox]' \
+    '--exec[run a command in the Litterbox with safely quoted arguments]' \
+    '--tty[with --exec: allocate a tty]' \
+    '--boxed[run through boxed-run]' \
+    '--wrap[run through this command inside the Litterbox]:command: ' \
+    '--scheme[also handle URLs of this scheme]:scheme: ' \
+    '--url-handler[register as the default handler for its URL schemes]' \
+    '--delete[remove what was exported]' \
+    '--export-path[where --bin puts the command]:directory:_files -/' \
+    '(-h --help)'{-h,--help}'[show help]' \
+    '1:Litterbox:_litterbox_names'
+}
+
+_litterbox_update() {
+  _arguments \
+    '(-n --dry-run)'{-n,--dry-run}'[only show what would run]' \
+    '--no-sandbox[pacman: add --disable-sandbox]' \
+    '--all[every Litterbox with a definition]' \
+    '(-h --help)'{-h,--help}'[show help]' \
+    '*:Litterbox:_litterbox_names'
+}
+
+_litterbox_prune() {
+  _arguments \
+    '(-y --yes)'{-y,--yes}'[actually remove the images]' \
+    '(-h --help)'{-h,--help}'[show help]' \
+    '*:Litterbox:_litterbox_names'
+}
+
+_litterbox_assemble() {
+  _arguments \
+    '(-t --template)'{-t,--template}'[Dockerfile template]:template:_litterbox_template_names' \
+    '*'{-p,--package}'[extra package to install]:package: ' \
+    '*'{-a,--addon}'[add a litterbox-addon addon]:addon:_litterbox_addon_names' \
+    '*'{-s,--set}'[a setting for the .ron file]:setting:_litterbox_settings' \
+    '(-f --file)'{-f,--file}'[read boxes from a manifest]:manifest:_files' \
+    '--replace[overwrite an existing definition]' \
+    '(-n --dry-run)'{-n,--dry-run}'[show what would be written]' \
+    '--build[run litterbox build afterwards]' \
+    '--list-templates[show the available templates]' \
+    '(-h --help)'{-h,--help}'[show help]' \
+    '*:name: '
+}
+
+case $service in
+  litterbox) _litterbox_main "$@" ;;
+  litterbox-addon) _litterbox_addon "$@" ;;
+  litterbox-export) _litterbox_export "$@" ;;
+  litterbox-update) _litterbox_update "$@" ;;
+  litterbox-prune) _litterbox_prune "$@" ;;
+  litterbox-assemble) _litterbox_assemble "$@" ;;
+esac
