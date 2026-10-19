@@ -1,6 +1,6 @@
 # Maintainer: BoppOS Team
 pkgname=litterbox-sandbox-addons
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc="Host tools for Litterbox sandboxes: assemble definitions, install addons, export apps and terminals to the desktop, update packages inside a sandbox and prune old images, with shell completions, plus the boxed-run addon (keyring and D-Bus for IDEs)"
 arch=('any')
