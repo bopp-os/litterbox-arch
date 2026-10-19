@@ -5,8 +5,9 @@
 # It only writes ~/Litterbox/definitions/<name>.Dockerfile and <name>.ron; it never builds anything unless
 # you pass --build. The Dockerfile is upstream Litterbox's own template for the installed version (shipped by
 # the litterbox-sandbox package) plus a marked block that installs your packages, plus the addon block from
-# litterbox-addon. Every value is validated before it goes into a file, and all boxes of a manifest are
-# generated in a staging directory first, so a mistake in one section writes nothing at all.
+# litterbox-addon, plus any Dockerfile fragments you ask it to append. Every value is validated before it goes into a
+# file, and all boxes of a manifest are generated in a staging directory first, so a mistake in one section writes
+# nothing at all.
 set -eu
 
 LBX_ROOT="${LITTERBOX_ROOT:-${HOME:?HOME is not set}/Litterbox}"
@@ -28,9 +29,12 @@ Creates ~/Litterbox/definitions/<name>.Dockerfile and <name>.ron. Then run: litt
 (when it asks whether to change the settings, answer No to keep the generated ones).
 
 Options:
-  -t, --template T    cachyos (default), fedora, tumbleweed or ubuntu-latest
+  -t, --template T    cachyos (default), cachyos-v4, cachyos-znver4, fedora, tumbleweed or ubuntu-latest
+                        (see --list-templates; the cachyos-v4/znver4 ones are added by this package's patch)
   -p, --package PKG   Extra package to install in the image (repeatable; a quoted list also works)
   -a, --addon NAME    Add a litterbox-addon addon, e.g. boxed-run (Arch/CachyOS templates only)
+  -A, --append FILE   Append a Dockerfile fragment after the generated blocks (repeatable; 1 byte to 256 KiB). Its text is
+                        copied verbatim and runs as root during 'litterbox build', so only use files you wrote or read.
   -s, --set KEY=VAL   A setting for <name>.ron (repeatable). All default to the most isolated value.
                         $BOOL_KEYS : true | false
                         shm_size_gb      : a number of GB, or none
@@ -49,6 +53,7 @@ Manifest format ('#' starts a comment):
   template = cachyos
   packages = git neovim ripgrep
   addons   = boxed-run
+  append   = web.extra.Dockerfile   # relative to the manifest's directory, or absolute
   set.expose_pipewire = true
   set.network_mode    = Pasta
 EOF
@@ -63,7 +68,7 @@ valid_pkg() { printf '%s\n' "$1" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9@._+:-]*$'; }
 
 template_family() {
   case $1 in
-    cachyos) echo arch ;;
+    cachyos|cachyos-v4|cachyos-znver4) echo arch ;;
     fedora) echo fedora ;;
     tumbleweed) echo suse ;;
     ubuntu-latest) echo debian ;;
@@ -103,6 +108,14 @@ add_spec() {
         valid_name "$a" || die "$s_where: invalid addon name '$a'"
         echo "addon=$a" >> "$s_file"
       done ;;
+    append)
+      if printf '%s' "$s_val" | LC_ALL=C grep -q '[^[:print:]]'; then die "$s_where: invalid append path"; fi
+      [ -n "$s_val" ] || die "$s_where: append needs a file"
+      case $s_val in /*) s_path=$s_val ;; *) s_path="$BASE_DIR/$s_val" ;; esac
+      if [ ! -f "$s_path" ] || [ ! -r "$s_path" ]; then die "$s_where: append file '$s_val' is not a readable regular file"; fi
+      s_size=$(wc -c < "$s_path" | tr -d ' ')
+      if [ "$s_size" -lt 1 ] || [ "$s_size" -gt 262144 ]; then die "$s_where: append file '$s_val' must be between 1 byte and 256 KiB"; fi
+      echo "append=$s_path" >> "$s_file" ;;
     set.*)
       k=${s_key#set.}
       case $k in
@@ -126,12 +139,15 @@ add_spec() {
 }
 
 mode=flags; file=''; names=''; replace=0; dry_run=0; do_build=0; list_templates=0
-flag_template=''; flag_packages=''; flag_addons=''; flag_sets=''
+flag_template=''; flag_packages=''; flag_addons=''; flag_sets=''; flag_appends=''
+BASE_DIR=$PWD   # relative append paths: the manifest's directory (set below), else the current directory
 while [ $# -gt 0 ]; do
   case $1 in
     -t|--template) [ $# -ge 2 ] || die "$1 needs a value"; flag_template=$2; shift ;;
     -p|--package) [ $# -ge 2 ] || die "$1 needs a value"; flag_packages="$flag_packages $2"; shift ;;
     -a|--addon) [ $# -ge 2 ] || die "$1 needs a value"; flag_addons="$flag_addons $2"; shift ;;
+    -A|--append) [ $# -ge 2 ] || die "$1 needs a file"; flag_appends="$flag_appends
+$2"; shift ;;
     -s|--set) [ $# -ge 2 ] || die "$1 needs KEY=VALUE"
       case $2 in *=*) ;; *) die "--set needs KEY=VALUE, got '$2'" ;; esac
       flag_sets="$flag_sets
@@ -177,9 +193,16 @@ if [ "$mode" = flags ]; then
   done <<EOF
 $flag_sets
 EOF
+  while IFS= read -r ap; do
+    [ -n "$ap" ] || continue
+    add_spec "$box" append "$ap" "--append"
+  done <<EOF
+$flag_appends
+EOF
 else
-  [ -z "$flag_template$flag_packages$flag_addons$flag_sets" ] || die "--template, --package, --addon and --set are for single boxes; put them in the manifest instead"
+  [ -z "$flag_template$flag_packages$flag_addons$flag_sets$flag_appends" ] || die "--template, --package, --addon, --append and --set are for single boxes; put them in the manifest instead"
   [ -f "$file" ] || die "manifest '$file' not found"
+  BASE_DIR=$(cd "$(dirname "$file")" && pwd)
   cur=''; lineno=0
   while IFS= read -r raw || [ -n "$raw" ]; do
     lineno=$((lineno + 1))
@@ -259,6 +282,18 @@ stage_box() {
     LITTERBOX_ROOT="$STAGE" sh "$tool" install "$box" $addons >/dev/null || die "[$box] adding the addons failed"
   fi
 
+  # Dockerfile fragments last, so they can build on everything above (this is arbitrary text, run as root by the build).
+  spec_get "$box" append | while IFS= read -r ap; do
+    [ -n "$ap" ] || continue
+    {
+      echo "# >>> litterbox-assemble append: $(basename "$ap") >>>"
+      echo "# Copied by litterbox-assemble from a file named $(basename "$ap"). Edits between these markers are overwritten."
+      cat "$ap"
+      [ -z "$(tail -c1 "$ap")" ] || echo
+      echo "# <<< litterbox-assemble append <<<"
+    } >> "$def"
+  done
+
   {
     echo '('
     echo '    version: 1,'
@@ -298,10 +333,11 @@ for box in $order; do
   read -r tpl fam < "$STAGE/$box.info"
   npk=$(spec_get "$box" package | sort -u | wc -l | tr -d ' ')
   adds=$(spec_get "$box" addon | sort -u | tr '\n' ' ' | sed 's/ $//')
-  echo "==> $box: template $tpl ($fam family), $npk extra package(s)${adds:+, addons: $adds}"
+  napp=$(spec_get "$box" append | grep -c . || true)
+  echo "==> $box: template $tpl ($fam family), $npk extra package(s)${adds:+, addons: $adds}$([ "$napp" = 0 ] || echo ", $napp appended file(s)")"
   if [ "$dry_run" = 1 ]; then
     echo "    --- $box.Dockerfile (template plus the blocks added by this tool) ---"
-    sed -n "/^$PKG_BEGIN\$/,/^$PKG_END\$/p;/^# >>> litterbox-addons >>>\$/,/^# <<< litterbox-addons <<<\$/p" "$STAGE/definitions/$box.Dockerfile" | sed 's/^/    /' | head -n 40
+    sed -n "/^$PKG_BEGIN\$/,/^$PKG_END\$/p;/^# >>> litterbox-addons >>>\$/,/^# <<< litterbox-addons <<<\$/p;/^# >>> litterbox-assemble append: /,/^# <<< litterbox-assemble append <<<\$/p" "$STAGE/definitions/$box.Dockerfile" | sed 's/^/    /' | head -n 40
     echo "    --- $box.ron ---"
     sed 's/^/    /' "$STAGE/definitions/$box.ron"
   else
@@ -315,6 +351,7 @@ for box in $order; do
     done
     written="$written $box"
   fi
+  if [ "$napp" != 0 ]; then echo "    Note: the appended Dockerfile text runs as root during 'litterbox build'."; fi
   widen=$(cat "$STAGE/$box.widen")
   if [ -n "$widen" ]; then echo "    Settings that widen what this sandbox can reach:$widen"; fi
   host_warnings "$box" | while IFS= read -r w; do echo "    warning: $w"; done

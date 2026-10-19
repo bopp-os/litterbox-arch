@@ -94,13 +94,16 @@ Manifest format (`#` comments, CRLF fine; the whole file is validated and staged
 template = cachyos            # cachyos (default), fedora, tumbleweed, ubuntu-latest
 packages = git neovim ripgrep
 addons   = boxed-run          # Arch/CachyOS template only, because litterbox-addon is
+append   = web.extra.Dockerfile   # a Dockerfile fragment, relative to the manifest's directory (or absolute)
 set.expose_pipewire = true
 set.network_mode    = Pasta
 ```
 
 The Dockerfile is upstream Litterbox's own template for the installed version (the `litterbox-sandbox` package installs them under
 `/usr/share/litterbox-sandbox/templates`) plus a marked block that installs your packages with the template's package manager, plus the
-`litterbox-addon` block. Settings default to the most isolated values; the ones you widen are listed after generation, and any that need
+`litterbox-addon` block, plus any `append` fragments (`-A FILE` on the command line), copied verbatim after everything else so they survive
+`--replace`. Appended text can do anything the image build can, as root, so the tool prints a note and you should only append files you wrote
+or read. Settings default to the most isolated values; the ones you widen are listed after generation, and any that need
 something this host lacks (`/dev/kvm`, `/dev/kfd`, PipeWire) get a warning. `custom_podman_args` is deliberately not accepted, since it can
 add arbitrary podman flags: edit the `.ron` yourself if you need it. An existing definition is refused unless you pass `--replace`.
 

@@ -16,6 +16,9 @@ mkdir -p "$TPL" "$BIN" "$W/addons/boxed-run" "$W/home"
 for t in cachyos fedora tumbleweed ubuntu-latest; do
   curl -fsSL "https://raw.githubusercontent.com/Gerharddc/litterbox/v0.6.5/litterbox/templates/$t.Dockerfile" -o "$TPL/$t.Dockerfile" || { echo "FAIL: cannot fetch template $t (needs network)"; exit 1; }
 done
+# The CachyOS CPU-variant templates that litterbox-sandbox's patch adds: upstream's cachyos template with another base image.
+sed 's#^FROM .*#FROM ghcr.io/bopp-os/cachyos-docker/cachyos-znver4:latest#' "$TPL/cachyos.Dockerfile" > "$TPL/cachyos-znver4.Dockerfile"
+sed 's#^FROM .*#FROM docker.io/cachyos/cachyos-v4:latest#' "$TPL/cachyos.Dockerfile" > "$TPL/cachyos-v4.Dockerfile"
 cp "$SRC/boxed-run" "$SRC/boxed-run.packages.arch" "$W/addons/boxed-run/"; mv "$W/addons/boxed-run/boxed-run.packages.arch" "$W/addons/boxed-run/packages.arch"
 printf '#!/bin/sh\necho "litterbox $*" >> "%s/litterbox.log"\n' "$W" > "$BIN/litterbox"; chmod +x "$BIN/litterbox"
 
@@ -141,7 +144,45 @@ printf 'FROM scratch\n' > "$TPL/weird.Dockerfile"
 clean; run --list-templates
 echo "$out" | grep -q '^cachyos (arch family, pacman -S --noconfirm)' && echo "$out" | grep -q '^tumbleweed (suse family' && echo "$out" | grep -q '^weird (not supported' && ok "--list-templates shows each template, its family, and flags unknown ones" || { echo "$out"; fail "list templates"; }
 rm -f "$TPL/weird.Dockerfile"
+echo "$out" | grep -q '^cachyos-znver4 (arch family' && echo "$out" | grep -q '^cachyos-v4 (arch family' && ok "--list-templates: the CachyOS CPU variants are arch family" || { echo "$out"; fail "cpu variants listed"; }
+for t in cachyos-znver4 cachyos-v4; do
+  clean; run cpu -t $t -p git -a boxed-run
+  [ "$rc" = 0 ] && head -n 3 "$DEFS/cpu.Dockerfile" | grep -q "^FROM .*${t#cachyos-}\|^FROM .*cachyos-${t#cachyos-}" && has "$DEFS/cpu.Dockerfile" 'RUN pacman -S --noconfirm --needed git' && has "$DEFS/cpu.Dockerfile" '# >>> litterbox-addons >>>' \
+    && ok "$t: its own base image, pacman packages and the addon block" || { echo "$out"; head -n 4 "$DEFS/cpu.Dockerfile"; fail "$t template"; }
+done
 out=$(env LITTERBOX_TEMPLATE_DIR="$W/none" LITTERBOX_ROOT="$LBX" HOME="$W/home" sh "$SCRIPT" x 2>&1); rc=$?
 [ "$rc" != 0 ] && echo "$out" | grep -q 'no templates found' && ok "a missing template directory is a clear error" || fail "missing templates"
+
+# --- append: a Dockerfile fragment copied after the generated blocks --------------------------------------------------------------------------------
+printf 'RUN echo first\nRUN echo second' > "$W/frag.Dockerfile"        # no trailing newline on purpose
+mkdir -p "$W/mdir"; printf 'RUN echo from-manifest-dir\n' > "$W/mdir/extra.Dockerfile"
+clean; run ap -p git -a boxed-run -A "$W/frag.Dockerfile"
+last=$(grep -n '^# <<< litterbox-assemble append <<<$' "$DEFS/ap.Dockerfile" | cut -d: -f1); ad=$(grep -n '^# <<< litterbox-addons <<<$' "$DEFS/ap.Dockerfile" | cut -d: -f1)
+[ "$rc" = 0 ] && has "$DEFS/ap.Dockerfile" 'RUN echo first' && has "$DEFS/ap.Dockerfile" 'RUN echo second' && has "$DEFS/ap.Dockerfile" '# >>> litterbox-assemble append: frag.Dockerfile >>>' \
+  && [ -n "$ad" ] && [ "$last" -gt "$ad" ] && [ "$(tail -n 1 "$DEFS/ap.Dockerfile")" = '# <<< litterbox-assemble append <<<' ] \
+  && echo "$out" | grep -q 'appended Dockerfile text runs as root' && ok "--append: the fragment is copied verbatim after the packages and addon blocks, wrapped in markers, with a note" || { echo "$out"; tail -8 "$DEFS/ap.Dockerfile"; fail "append flag"; }
+size=$(wc -c < "$TPL/cachyos.Dockerfile"); [ "$(head -c "$size" "$DEFS/ap.Dockerfile")" = "$(cat "$TPL/cachyos.Dockerfile")" ] && ok "the template text still comes first, unchanged" || fail "template prefix with append"
+
+printf '[ap]\ntemplate = cachyos\nappend = extra.Dockerfile\n[ab]\ntemplate = fedora\nappend = %s\n' "$W/frag.Dockerfile" > "$W/mdir/m.conf"
+clean; (cd "$W/home" && run --file "$W/mdir/m.conf")
+[ "$rc" = 0 ] && has "$DEFS/ap.Dockerfile" 'RUN echo from-manifest-dir' && has "$DEFS/ab.Dockerfile" 'RUN echo second' \
+  && ok "manifest: a relative append path is relative to the manifest's directory (not the current one), an absolute one works, any template" || { echo "$out"; fail "manifest append"; }
+s1=$(sha256sum "$DEFS/ap.Dockerfile" | cut -d' ' -f1); run --replace --file "$W/mdir/m.conf"; s2=$(sha256sum "$DEFS/ap.Dockerfile" | cut -d' ' -f1)
+[ "$rc" = 0 ] && [ "$s1" = "$s2" ] && [ "$(grep -c 'RUN echo from-manifest-dir' "$DEFS/ap.Dockerfile")" = 1 ] && ok "--replace regenerates the same definition (the fragment is not duplicated)" || { echo "$out"; fail "append replace"; }
+clean; run --file "$W/mdir/m.conf" --dry-run
+[ "$rc" = 0 ] && echo "$out" | grep -q '1 appended file(s)' && echo "$out" | grep -q 'RUN echo from-manifest-dir' && [ ! -e "$DEFS/ap.Dockerfile" ] && ok "--dry-run shows the appended block and writes nothing" || { echo "$out"; fail "append dry run"; }
+
+clean; run bad -A "$W/does-not-exist"
+[ "$rc" != 0 ] && echo "$out" | grep -q 'not a readable regular file' && [ -z "$(ls "$DEFS")" ] && ok "a missing append file is refused and nothing is written" || { echo "$out"; fail "append missing"; }
+clean; run bad -A "$W/mdir"
+[ "$rc" != 0 ] && echo "$out" | grep -q 'not a readable regular file' && ok "a directory is refused" || fail "append dir"
+: > "$W/empty.Dockerfile"; head -c 300000 /dev/zero | tr '\0' 'x' > "$W/big.Dockerfile"
+clean; run bad -A "$W/empty.Dockerfile"; [ "$rc" != 0 ] && echo "$out" | grep -q 'between 1 byte and 256 KiB' && ok "an empty fragment is refused" || fail "append empty"
+clean; run bad -A "$W/big.Dockerfile";   [ "$rc" != 0 ] && echo "$out" | grep -q 'between 1 byte and 256 KiB' && ok "an over-256-KiB fragment is refused" || fail "append big"
+printf '[ok]\ntemplate = cachyos\n[bad]\nappend = missing.Dockerfile\n' > "$W/mdir/bad.conf"
+clean; run --file "$W/mdir/bad.conf"
+[ "$rc" != 0 ] && [ -z "$(ls "$DEFS")" ] && ok "a bad append in one manifest section writes nothing for any section" || { echo "$out"; fail "append all-or-nothing"; }
+clean; run --file "$W/mdir/m.conf" -A "$W/frag.Dockerfile"
+[ "$rc" != 0 ] && echo "$out" | grep -q 'single boxes' && ok "--append with --file is refused (put it in the manifest)" || fail "append with file"
 
 [ "$FAILED" = 0 ] && echo "ALL PASSED" || { echo "SOME FAILED"; exit 1; }
