@@ -56,9 +56,11 @@ cp "$P" "$W/PKGBUILD.orig"
 sh "$TOOL" >/dev/null; rc=$?
 [ "$rc" = 0 ] && ok "default run applies the newer release" || fail "apply rc=$rc"
 sum=$(sha256sum "$UP/v0.7.0.tar.gz" | cut -d' ' -f1)
-grep -qx 'pkgver=0.7.0' "$P" && grep -qx 'pkgrel=1' "$P" && grep -qx "sha256sums=('$sum')" "$P" && ok "pkgver, pkgrel and sha256sums rewritten (sha256 is of the real tarball)" || { grep -E '^(pkgver|pkgrel|sha256sums)=' "$P"; fail "rewrite"; }
+grep -qx 'pkgver=0.7.0' "$P" && grep -qx 'pkgrel=1' "$P" && grep -q "^sha256sums=('$sum'" "$P" && ok "pkgver, pkgrel and the tarball's sha256 rewritten (sha256 is of the real tarball)" || { grep -E '^(pkgver|pkgrel|sha256sums)=' "$P"; fail "rewrite"; }
 bad=$(diff "$W/PKGBUILD.orig" "$P" | grep -E '^[<>]' | grep -vE '^[<>] (pkgver|pkgrel|sha256sums)=' || true)
 [ -z "$bad" ] && ok "no PKGBUILD line other than pkgver/pkgrel/sha256sums changed" || { echo "$bad"; fail "extra PKGBUILD changes"; }
+[ -n "$(grep -E "^ +'[0-9a-f]{64}'" "$W/PKGBUILD.orig")" ] && [ "$(grep -E "^ +'[0-9a-f]{64}'" "$W/PKGBUILD.orig")" = "$(grep -E "^ +'[0-9a-f]{64}'" "$P")" ] \
+  && ok "the patch checksums after the tarball's are left alone" || fail "patch checksums touched"
 okl=1
 for c in litterbox lbx-init shared; do
   tar -xzOf "$UP/v0.7.0.tar.gz" "Litterbox-0.7.0/$c/Cargo.lock" | cmp -s - "$FX/locks/$c/Cargo.lock" || okl=0

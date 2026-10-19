@@ -1,7 +1,7 @@
 # Maintainer: BoppOS Team
 pkgname=litterbox-sandbox
 pkgver=0.6.5
-pkgrel=1
+pkgrel=2
 pkgdesc="Somewhat isolated Podman development environments with a confirm-before-sign SSH agent"
 arch=('x86_64')
 url="https://litterbox.work"
@@ -23,13 +23,26 @@ optdepends=(
   'vulkan-icd-loader: pop-up rendering via Vulkan'
 )
 conflicts=('litterbox')
-source=("$pkgname-$pkgver.tar.gz::https://github.com/Gerharddc/litterbox/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('529ce2c0b9ce1fe617b1b36d343118b095a19cc242f997ab4d9fc924f086cd4b')
+# The tarball must stay first: tools/update-litterbox rewrites only the first checksum on the sha256sums= line.
+source=("$pkgname-$pkgver.tar.gz::https://github.com/Gerharddc/litterbox/archive/refs/tags/v$pkgver.tar.gz"
+        litterbox-stable-wayland-socket.patch
+        litterbox-cachyos-cpu-variants.patch)
+sha256sums=('529ce2c0b9ce1fe617b1b36d343118b095a19cc242f997ab4d9fc924f086cd4b'
+            'd5e249cb52a3dcf614c11413defe009dd14269118ae9f600e19be3cda8f8779a'
+            '64d41d4b9d7158dc004def7cc0f8824c6539beec90da929f31ddef6166b5d560')
 
 _musl=x86_64-unknown-linux-musl
 
 prepare() {
   cd "Litterbox-$pkgver"
+  # litterbox-stable-wayland-socket: the container's Wayland mount points at a stable per-Litterbox link that is
+  #   refreshed whenever the container starts, so a changed wayland-N name no longer breaks it.
+  # litterbox-cachyos-cpu-variants: x86-64-v4 and znver4 (ghcr.io/bopp-os/cachyos-docker) CachyOS templates.
+  # A patch that no longer applies to a new upstream release fails the build, which holds the update back.
+  local p
+  for p in litterbox-stable-wayland-socket litterbox-cachyos-cpu-variants; do
+    patch -Np1 -i "$srcdir/$p.patch"
+  done
   local host; host="$(rustc -vV | sed -n 's/host: //p')"
   (cd litterbox && cargo fetch --locked --target "$host")
   (cd lbx-init  && cargo fetch --locked --target "$_musl")

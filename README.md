@@ -162,6 +162,22 @@ tag. So nothing here reaches the pacman repo until that PR in pkgbuilds is merge
 
 Package folders hold only the PKGBUILD and its source files; `sh tests/run.sh` checks the checksums and the installed file list.
 
+## Patches to Litterbox (`litterbox-sandbox`)
+
+`litterbox-sandbox` applies two patches to upstream's source in `prepare()`:
+
+- `litterbox-stable-wayland-socket.patch`: the container's Wayland socket is mounted from a stable per-Litterbox link
+  (`$XDG_RUNTIME_DIR/litterbox/<name>/wayland-0`) that is refreshed whenever the container starts, so a compositor that comes up as a
+  different `wayland-N` no longer breaks it. Litterboxes built before the patch keep their old mount until `litterbox build <name>`.
+  Starting a stopped container now needs `WAYLAND_DISPLAY` to be set and its socket to exist.
+- `litterbox-cachyos-cpu-variants.patch`: `litterbox define` (and `litterbox-assemble --template`) also offer `cachyos-v4`
+  (`docker.io/cachyos/cachyos-v4`) and `cachyos-znver4` (`ghcr.io/bopp-os/cachyos-docker/cachyos-znver4`, built from
+  [bopp-os/cachyos-docker](https://github.com/bopp-os/cachyos-docker)). The existing `cachyos` template stays x86-64-v3.
+
+A patch that stops applying to a new upstream release fails the build, so the update workflow files an Issue instead of a pull request.
+`tests/pkgbuild.sh` checks that the patches apply to the pinned release and that the two new templates still equal upstream's
+`cachyos.Dockerfile` below their `FROM` line. Fix the patch, then refresh its checksum in the PKGBUILD.
+
 ## Tests
 
 ```

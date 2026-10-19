@@ -99,4 +99,30 @@ done
 bash -c 'source "$1/litterbox-sandbox/PKGBUILD"; case " ${options[*]-} " in *" !debug "*) exit 0 ;; *) exit 1 ;; esac' _ "$ROOT" \
   && ok "litterbox-sandbox sets options=('!debug')" || fail "litterbox-sandbox/PKGBUILD does not set options=('!debug')"
 
+# Patches that prepare() applies to upstream's source (needs network for the pinned tarball): every patch in source=() must
+# be applied by prepare(), apply cleanly in that order to the pinned release, and the CachyOS variant templates they add
+# must stay upstream's cachyos.Dockerfile except for the comment and FROM lines, so they cannot silently drift.
+SRC="$PKGDIR/upstream"; mkdir -p "$SRC"
+patches=$(bash -c 'source "$1/litterbox-sandbox/PKGBUILD"; for s in "${source[@]}"; do case $s in *.patch) echo "$s" ;; esac; done' _ "$ROOT")
+prep=$(bash -c 'source "$1/litterbox-sandbox/PKGBUILD"; declare -f prepare' _ "$ROOT")
+unused=''; for p in $patches; do printf '%s\n' "$prep" | grep -q "${p%.patch}" || unused="$unused $p"; done
+[ -n "$patches" ] && [ -z "$unused" ] && ok "prepare() applies every patch listed in source ($(echo $patches | wc -w))" || fail "patches not applied by prepare():${unused:- none listed}"
+bash -c 'source "$1/litterbox-sandbox/PKGBUILD"; curl -fsSL "${source[0]#*::}"' _ "$ROOT" | tar -xz -C "$SRC" --strip-components=1
+bad=''; for p in $patches; do
+  (cd "$SRC" && patch -Np1 -s -i "$ROOT/litterbox-sandbox/$p") || bad="$bad $p"
+done
+[ -z "$bad" ] && ok "the patches apply, in source() order, to the pinned upstream release" || fail "patch does not apply to the pinned release:$bad"
+T="$SRC/litterbox/templates"; drift=''
+[ "$(sed -n 3p "$T/cachyos.Dockerfile")" = "FROM docker.io/cachyos/cachyos-v3:latest" ] || drift="$drift cachyos.Dockerfile(not v3: relabel it)"
+for v in cachyos-v4:docker.io/cachyos/cachyos-v4:latest cachyos-znver4:ghcr.io/bopp-os/cachyos-docker/cachyos-znver4:latest; do
+  f=${v%%:*}; img=${v#*:}
+  [ -f "$T/$f.Dockerfile" ] || { drift="$drift $f(missing)"; continue; }
+  [ "$(sed -n 1p "$T/$f.Dockerfile")" = "$(sed -n 1p "$T/cachyos.Dockerfile")" ] || drift="$drift $f(line 1)"
+  [ "$(sed -n 3p "$T/$f.Dockerfile")" = "FROM $img" ] || drift="$drift $f(FROM)"
+  [ "$(tail -n +4 "$T/$f.Dockerfile")" = "$(tail -n +4 "$T/cachyos.Dockerfile")" ] || drift="$drift $f(body differs from upstream's cachyos.Dockerfile)"
+  grep -q "templates/$f.Dockerfile" "$SRC/litterbox/src/template.rs" || drift="$drift $f(not in template.rs)"
+done
+[ -z "$drift" ] && ok "the cachyos-v4 and cachyos-znver4 templates match upstream's cachyos.Dockerfile below their FROM line" \
+  || fail "CachyOS variant templates:$drift (regenerate them from upstream's cachyos.Dockerfile lines 1 and 4+ and refresh the patch + checksum)"
+
 [ "$FAILED" = 0 ] && echo "ALL PASSED" || { echo "SOME FAILED"; exit 1; }

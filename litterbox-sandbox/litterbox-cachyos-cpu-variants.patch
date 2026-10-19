@@ -1,0 +1,162 @@
+Add CachyOS template variants for other CPU levels to `litterbox define`.
+
+The upstream CachyOS template is fixed to the x86-64-v3 image. This adds two more choices to the
+template prompt, identical except for the base image (the Dockerfiles are copies of cachyos.Dockerfile
+below its FROM line; tests/pkgbuild.sh fails if they ever drift from upstream's):
+  x86-64-v4     docker.io/cachyos/cachyos-v4:latest
+  znver4        ghcr.io/bopp-os/cachyos-docker/cachyos-znver4:latest  (built by bopp-os/cachyos-docker)
+The existing template is unchanged, only its label now says which CPU level it is.
+
+diff --git a/litterbox/src/template.rs b/litterbox/src/template.rs
+index 24006fc..a1c62fb 100644
+--- a/litterbox/src/template.rs
++++ b/litterbox/src/template.rs
+@@ -6,6 +6,8 @@ pub enum Template {
+     OpenSuseTumbleweed,
+     UbuntuLts,
+     CachyOS,
++    CachyOSV4,
++    CachyOSZnver4,
+     Fedora,
+ }
+ 
+@@ -15,6 +17,8 @@ impl Template {
+             Template::OpenSuseTumbleweed => include_str!("../templates/tumbleweed.Dockerfile"),
+             Template::UbuntuLts => include_str!("../templates/ubuntu-latest.Dockerfile"),
+             Template::CachyOS => include_str!("../templates/cachyos.Dockerfile"),
++            Template::CachyOSV4 => include_str!("../templates/cachyos-v4.Dockerfile"),
++            Template::CachyOSZnver4 => include_str!("../templates/cachyos-znver4.Dockerfile"),
+             Template::Fedora => include_str!("../templates/fedora.Dockerfile"),
+         }
+     }
+@@ -23,7 +27,9 @@ impl Template {
+         match self {
+             Template::OpenSuseTumbleweed => "OpenSUSE Tumbleweed",
+             Template::UbuntuLts => "Ubuntu LTS",
+-            Template::CachyOS => "CachyOS",
++            Template::CachyOS => "CachyOS (x86-64-v3)",
++            Template::CachyOSV4 => "CachyOS (x86-64-v4)",
++            Template::CachyOSZnver4 => "CachyOS (znver4, bopp-os image)",
+             Template::Fedora => "Fedora",
+         }
+     }
+diff --git a/litterbox/templates/cachyos-v4.Dockerfile b/litterbox/templates/cachyos-v4.Dockerfile
+new file mode 100644
+index 0000000..fd0efad
+--- /dev/null
++++ b/litterbox/templates/cachyos-v4.Dockerfile
+@@ -0,0 +1,54 @@
++# syntax=docker/dockerfile:1.4
++# CachyOS image for CPUs with x86-64-v4 (AVX-512); the default template uses x86-64-v3
++FROM docker.io/cachyos/cachyos-v4:latest
++
++# Setup base system (install essential packages)
++RUN pacman -Syu --noconfirm && \
++    pacman -S --noconfirm wayland mesa vulkan-tools vulkan-radeon vulkan-intel openssh git iputils curl iproute2 rsync
++
++# Install the fish shell for a nicer experience (ADAPT TO YOUR OWN NEEDS)
++RUN pacman -S --noconfirm fish
++
++# Setup support for X11 apps through xwayland (ADAPT TO YOUR OWN NEEDS)
++RUN pacman -S --noconfirm xwayland-satellite
++ENV DISPLAY=:0
++
++# Install development toolchain and additional package managers (ADAPT TO YOUR OWN NEEDS)
++RUN pacman -S --noconfirm gcc
++
++# Setup non-root user for added security
++# (NB Litterbox assumes you do this step)
++ARG USER
++ARG UID
++ARG GID
++RUN groupadd -g $GID $USER || true
++RUN useradd -m $USER -u $UID -g $GID
++WORKDIR /home/$USER
++
++# We do not install things directly into $HOME here as they will get nuked
++# once the home directory gets mounted. Instead we use a script that runs
++# at start-up to construct the home directory the first time.
++#
++# A benefit of not installing things directly into home means that they do
++# need to be re-installed when the container gets rebuilt.
++RUN <<'EOF'
++# Create the script using a nested heredoc
++cat <<'EOT' > /prep-home.sh
++#!/usr/bin/env sh
++
++# -------------------------------------
++# ADAPT THIS EXAMPLE TO YOUR OWN NEEDS
++# -------------------------------------
++# curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
++EOT
++
++chmod +x /prep-home.sh
++chown $USER /prep-home.sh
++EOF
++
++# Set LANG to enable UTF-8 support
++ENV LANG=en_US.UTF-8
++
++# Enter the fish shell by default (ADAPT TO YOUR OWN NEEDS)
++ENV SHELL=fish
++RUN chsh -s /usr/bin/fish $USER
+diff --git a/litterbox/templates/cachyos-znver4.Dockerfile b/litterbox/templates/cachyos-znver4.Dockerfile
+new file mode 100644
+index 0000000..d6df7fc
+--- /dev/null
++++ b/litterbox/templates/cachyos-znver4.Dockerfile
+@@ -0,0 +1,54 @@
++# syntax=docker/dockerfile:1.4
++# CachyOS image tuned for AMD Zen 4 and newer, built by bopp-os: https://github.com/bopp-os/cachyos-docker
++FROM ghcr.io/bopp-os/cachyos-docker/cachyos-znver4:latest
++
++# Setup base system (install essential packages)
++RUN pacman -Syu --noconfirm && \
++    pacman -S --noconfirm wayland mesa vulkan-tools vulkan-radeon vulkan-intel openssh git iputils curl iproute2 rsync
++
++# Install the fish shell for a nicer experience (ADAPT TO YOUR OWN NEEDS)
++RUN pacman -S --noconfirm fish
++
++# Setup support for X11 apps through xwayland (ADAPT TO YOUR OWN NEEDS)
++RUN pacman -S --noconfirm xwayland-satellite
++ENV DISPLAY=:0
++
++# Install development toolchain and additional package managers (ADAPT TO YOUR OWN NEEDS)
++RUN pacman -S --noconfirm gcc
++
++# Setup non-root user for added security
++# (NB Litterbox assumes you do this step)
++ARG USER
++ARG UID
++ARG GID
++RUN groupadd -g $GID $USER || true
++RUN useradd -m $USER -u $UID -g $GID
++WORKDIR /home/$USER
++
++# We do not install things directly into $HOME here as they will get nuked
++# once the home directory gets mounted. Instead we use a script that runs
++# at start-up to construct the home directory the first time.
++#
++# A benefit of not installing things directly into home means that they do
++# need to be re-installed when the container gets rebuilt.
++RUN <<'EOF'
++# Create the script using a nested heredoc
++cat <<'EOT' > /prep-home.sh
++#!/usr/bin/env sh
++
++# -------------------------------------
++# ADAPT THIS EXAMPLE TO YOUR OWN NEEDS
++# -------------------------------------
++# curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
++EOT
++
++chmod +x /prep-home.sh
++chown $USER /prep-home.sh
++EOF
++
++# Set LANG to enable UTF-8 support
++ENV LANG=en_US.UTF-8
++
++# Enter the fish shell by default (ADAPT TO YOUR OWN NEEDS)
++ENV SHELL=fish
++RUN chsh -s /usr/bin/fish $USER

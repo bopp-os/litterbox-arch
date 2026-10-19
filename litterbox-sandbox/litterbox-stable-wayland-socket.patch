@@ -1,0 +1,127 @@
+diff --git a/litterbox/src/commands/enter.rs b/litterbox/src/commands/enter.rs
+index 9fd2f48..7a8599c 100644
+--- a/litterbox/src/commands/enter.rs
++++ b/litterbox/src/commands/enter.rs
+@@ -97,6 +97,10 @@ impl Command {
+         if !is_container_running(&self.name)? {
+             info!("Container is not running yet; starting now...");
+ 
++            // The container's Wayland mount points at a stable link; make sure
++            // it refers to the compositor that is running right now.
++            files::refresh_wayland_socket_link(&self.name)?;
++
+             let mut cmd = Command::new("podman");
+             cmd.stdout(Stdio::null());
+             cmd.args(["start", &container_id]);
+diff --git a/litterbox/src/files.rs b/litterbox/src/files.rs
+index cd37937..c4f185c 100644
+--- a/litterbox/src/files.rs
++++ b/litterbox/src/files.rs
+@@ -126,6 +126,57 @@ pub fn pipewire_socket_path() -> Result<PathBuf> {
+     Ok(xdg_runtime_dir)
+ }
+ 
++/// Name of the Wayland socket as seen from inside every Litterbox. It is fixed
++/// so that the container does not depend on which `wayland-N` name the host
++/// compositor happened to pick when the Litterbox was built.
++pub const LBX_WAYLAND_DISPLAY: &str = "wayland-0";
++
++/// Stable host-side path that gets bind-mounted into the container as its
++/// Wayland socket.
++pub fn wayland_socket_link_path(lbx_name: &str) -> Result<PathBuf> {
++    Ok(env::xdg_runtime_dir()?
++        .join("litterbox")
++        .join(lbx_name)
++        .join(LBX_WAYLAND_DISPLAY))
++}
++
++/// Point the stable socket path at the compositor's current socket.
++///
++/// Podman resolves bind-mount sources when a container starts, so this must run
++/// before every `podman create`/`podman start`. That way the mount source always
++/// exists and refers to the live compositor, whatever `wayland-N` name it got.
++pub fn refresh_wayland_socket_link(lbx_name: &str) -> Result<PathBuf> {
++    let link = wayland_socket_link_path(lbx_name)?;
++
++    let display = env::wayland_display()
++        .context("WAYLAND_DISPLAY is not set. Run litterbox from inside your Wayland session.")?;
++    let display = Path::new(&display);
++    let target = if display.is_absolute() {
++        display.to_path_buf()
++    } else {
++        env::xdg_runtime_dir()?.join(display)
++    };
++    if !fs::exists(&target)? {
++        anyhow::bail!("Wayland socket {} does not exist", target.display());
++    }
++
++    let parent = link
++        .parent()
++        .expect("Wayland link path should have parent.");
++    fs::create_dir_all(parent).context("Failed to create Litterbox runtime directory")?;
++
++    // Create under a temporary name and rename over the old link so that two
++    // concurrent `enter`s cannot race each other.
++    let tmp = parent.join(format!(".{LBX_WAYLAND_DISPLAY}.{}", std::process::id()));
++    let _ = fs::remove_file(&tmp);
++    std::os::unix::fs::symlink(&target, &tmp)
++        .with_context(|| format!("Failed to create Wayland socket link {}", tmp.display()))?;
++    fs::rename(&tmp, &link).context("Failed to replace Wayland socket link")?;
++
++    log::debug!("Linked {} -> {}", link.display(), target.display());
++    Ok(link)
++}
++
+ pub fn write_file(path: &Path, contents: &str) -> Result<()> {
+     let output_dir = path.parent().expect("Path should have parent.");
+     fs::create_dir_all(output_dir)?;
+diff --git a/litterbox/src/podman.rs b/litterbox/src/podman.rs
+index 2abc04c..197e55e 100644
+--- a/litterbox/src/podman.rs
++++ b/litterbox/src/podman.rs
+@@ -5,7 +5,6 @@ use log::{debug, warn};
+ use nix::unistd::{getgid, getuid};
+ use serde::Deserialize;
+ use std::{
+-    ffi::OsString,
+     fs,
+     io::ErrorKind,
+     path::{Path, PathBuf},
+@@ -307,8 +306,7 @@ pub fn build_litterbox(lbx_name: &str) -> Result<()> {
+     let uid = getuid();
+ 
+     let rt_dir = PathBuf::from(&format!("/run/user/{uid}"));
+-    let wayland_display = env::wayland_display()?;
+-    let host_rt_dir = env::xdg_runtime_dir()?;
++    let wayland_socket = files::refresh_wayland_socket_link(lbx_name)?;
+ 
+     let lbx_home_path = files::lbx_home_path(lbx_name)?;
+     fs::create_dir_all(&lbx_home_path).context("Failed to create litterbox home directory")?;
+@@ -343,7 +341,10 @@ pub fn build_litterbox(lbx_name: &str) -> Result<()> {
+         &format!("XDG_RUNTIME_DIR={}", rt_dir.to_string_lossy()),
+     ]);
+     cmd.args(["--env", "XDG_SESSION_TYPE=wayland"]);
+-    cmd.args(["--env", &format!("WAYLAND_DISPLAY={wayland_display}")]);
++    cmd.args([
++        "--env",
++        &format!("WAYLAND_DISPLAY={}", files::LBX_WAYLAND_DISPLAY),
++    ]);
+     cmd.args(["--hostname", &format!("lbx-{lbx_name}")]);
+     cmd.args(["--label", &format!("work.litterbox.name={lbx_name}")]);
+     cmd.args(["--name", &container_name]);
+@@ -372,13 +373,11 @@ pub fn build_litterbox(lbx_name: &str) -> Result<()> {
+     cmd.arg("--volume");
+     cmd.arg(ssh_sock_mount);
+ 
+-    let mut wayland_display_mount = OsString::from(&host_rt_dir);
+-    wayland_display_mount.push("/");
+-    wayland_display_mount.push(&wayland_display);
++    let mut wayland_display_mount = wayland_socket.into_os_string();
+     wayland_display_mount.push(":");
+     wayland_display_mount.push(&rt_dir);
+     wayland_display_mount.push("/");
+-    wayland_display_mount.push(&wayland_display);
++    wayland_display_mount.push(files::LBX_WAYLAND_DISPLAY);
+ 
+     cmd.arg("--volume");
+     cmd.arg(wayland_display_mount);

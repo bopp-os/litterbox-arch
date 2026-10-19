@@ -110,7 +110,7 @@ apply() {
   done
   sed -e "s/^pkgver=.*/pkgver=$version/" \
       -e "s/^pkgrel=.*/pkgrel=1/" \
-      -e "s/^sha256sums=.*/sha256sums=('$sum')/" "$PKGBUILD" > "$tmp/PKGBUILD.new"
+      -e "s/^sha256sums=('[0-9a-f]\{64\}'/sha256sums=('$sum'/" "$PKGBUILD" > "$tmp/PKGBUILD.new"
   cat "$tmp/PKGBUILD.new" > "$PKGBUILD"
 
   for c in $CRATES; do
@@ -120,7 +120,7 @@ apply() {
 
   # Re-read what we wrote.
   [ "$(current_version)" = "$version" ] || die "verification failed: pkgver"
-  grep -qx "sha256sums=('$sum')" "$PKGBUILD" || die "verification failed: sha256sums"
+  grep -q "^sha256sums=('$sum'" "$PKGBUILD" || die "verification failed: sha256sums"
   check_only_expected_changes
 
   echo "Updated litterbox-sandbox: $cur -> $version"
