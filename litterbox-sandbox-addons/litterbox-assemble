@@ -35,12 +35,14 @@ Options:
   -a, --addon NAME    Add a litterbox-addon addon, e.g. boxed-run (Arch/CachyOS templates only)
   -A, --append FILE   Append a Dockerfile fragment after the generated blocks (repeatable; 1 byte to 256 KiB). Its text is
                         copied verbatim and runs as root during 'litterbox build', so only use files you wrote or read.
+  -V, --volume SPEC   A bind mount, SRC:DST[:ro|rw] (repeatable). SRC and DST are absolute paths without spaces or '..'; SRC may start
+                        with ~/ for your home. Goes into custom_podman_args as '-v SPEC', which is all this option can add.
   -s, --set KEY=VAL   A setting for <name>.ron (repeatable). All default to the most isolated value.
                         $BOOL_KEYS : true | false
                         shm_size_gb      : a number of GB, or none
                         network_mode     : Pasta | PastaHostToContainer | PastaContainerToHost |
                                            PastaBidirectional | Host
-                      (custom_podman_args can add arbitrary podman flags, so it is not accepted here)
+                      (custom_podman_args can add arbitrary podman flags, so it is not accepted here; use --volume)
   -f, --file FILE     Read one or more boxes from a manifest; with names, only those sections
       --replace       Overwrite an existing definition (otherwise it is refused, like litterbox define)
   -n, --dry-run       Show what would be written and write nothing
@@ -54,6 +56,8 @@ Manifest format ('#' starts a comment):
   packages = git neovim ripgrep
   addons   = boxed-run
   append   = web.extra.Dockerfile   # relative to the manifest's directory, or absolute
+  volume   = ~/Projects:/home/me/Projects
+  volume   = /dev/bus/usb:/dev/bus/usb:rw
   set.expose_pipewire = true
   set.network_mode    = Pasta
 EOF
@@ -116,6 +120,18 @@ add_spec() {
       s_size=$(wc -c < "$s_path" | tr -d ' ')
       if [ "$s_size" -lt 1 ] || [ "$s_size" -gt 262144 ]; then die "$s_where: append file '$s_val' must be between 1 byte and 256 KiB"; fi
       echo "append=$s_path" >> "$s_file" ;;
+    volume)
+      case $s_val in *:*) ;; *) die "$s_where: volume must be SRC:DST[:ro|rw], got '$s_val'" ;; esac
+      v_src=${s_val%%:*}; v_rest=${s_val#*:}; v_dst=${v_rest%%:*}; v_opt=''
+      case $v_rest in *:*) v_opt=${v_rest#*:} ;; esac
+      case $v_opt in ''|ro|rw) ;; *) die "$s_where: volume option must be ro or rw, got '$v_opt'" ;; esac
+      case $v_src in \~/*) v_src="${HOME:?HOME is not set}/${v_src#\~/}" ;; esac
+      for v_p in "$v_src" "$v_dst"; do
+        printf '%s\n' "$v_p" | grep -Eq '^/[A-Za-z0-9._+@%/-]*$' || die "$s_where: volume path '$v_p' must be absolute and use only letters, digits and . _ + @ % / -"
+        case "$v_p/" in */../*|*/./*|*//*) die "$s_where: volume path '$v_p' must not contain '..', '.' or '//' components" ;; esac
+        [ "$v_p" != / ] || die "$s_where: mounting / is not accepted"
+      done
+      echo "volume=$v_src:$v_dst${v_opt:+:$v_opt}" >> "$s_file" ;;
     set.*)
       k=${s_key#set.}
       case $k in
@@ -130,7 +146,7 @@ add_spec() {
         network_mode)
           case $s_val in Pasta|PastaHostToContainer|PastaContainerToHost|PastaBidirectional|Host) ;;
             *) die "$s_where: network_mode must be Pasta, PastaHostToContainer, PastaContainerToHost, PastaBidirectional or Host" ;; esac ;;
-        custom_podman_args) die "$s_where: custom_podman_args is not accepted here because it can add arbitrary podman flags; edit $s_name.ron by hand if you really need it" ;;
+        custom_podman_args) die "$s_where: custom_podman_args is not accepted here because it can add arbitrary podman flags; use volume = SRC:DST for mounts, or edit $s_name.ron by hand if you really need more" ;;
         *) die "$s_where: unknown setting '$k'" ;;
       esac
       echo "set=$k=$s_val" >> "$s_file" ;;
@@ -139,13 +155,15 @@ add_spec() {
 }
 
 mode=flags; file=''; names=''; replace=0; dry_run=0; do_build=0; list_templates=0
-flag_template=''; flag_packages=''; flag_addons=''; flag_sets=''; flag_appends=''
+flag_template=''; flag_packages=''; flag_addons=''; flag_sets=''; flag_appends=''; flag_volumes=''
 BASE_DIR=$PWD   # relative append paths: the manifest's directory (set below), else the current directory
 while [ $# -gt 0 ]; do
   case $1 in
     -t|--template) [ $# -ge 2 ] || die "$1 needs a value"; flag_template=$2; shift ;;
     -p|--package) [ $# -ge 2 ] || die "$1 needs a value"; flag_packages="$flag_packages $2"; shift ;;
     -a|--addon) [ $# -ge 2 ] || die "$1 needs a value"; flag_addons="$flag_addons $2"; shift ;;
+    -V|--volume) [ $# -ge 2 ] || die "$1 needs SRC:DST[:ro|rw]"; flag_volumes="$flag_volumes
+$2"; shift ;;
     -A|--append) [ $# -ge 2 ] || die "$1 needs a file"; flag_appends="$flag_appends
 $2"; shift ;;
     -s|--set) [ $# -ge 2 ] || die "$1 needs KEY=VALUE"
@@ -199,8 +217,14 @@ EOF
   done <<EOF
 $flag_appends
 EOF
+  while IFS= read -r vo; do
+    [ -n "$vo" ] || continue
+    add_spec "$box" volume "$vo" "--volume"
+  done <<EOF
+$flag_volumes
+EOF
 else
-  [ -z "$flag_template$flag_packages$flag_addons$flag_sets$flag_appends" ] || die "--template, --package, --addon, --append and --set are for single boxes; put them in the manifest instead"
+  [ -z "$flag_template$flag_packages$flag_addons$flag_sets$flag_appends$flag_volumes" ] || die "--template, --package, --addon, --append, --volume and --set are for single boxes; put them in the manifest instead"
   [ -f "$file" ] || die "manifest '$file' not found"
   BASE_DIR=$(cd "$(dirname "$file")" && pwd)
   cur=''; lineno=0
@@ -217,7 +241,8 @@ else
       *=*)
         [ -n "$cur" ] || die "$file:$lineno: setting outside of a [section]"
         key=$(printf '%s' "${line%%=*}" | sed 's/[[:space:]]*$//')
-        val=$(printf '%s' "${line#*=}" | sed 's/^[[:space:]]*//')
+        # a '#' after whitespace starts a comment (so no value can contain ' #')
+        val=$(printf '%s' "${line#*=}" | sed 's/^[[:space:]]*//; s/[[:space:]]\{1,\}#.*$//; s/[[:space:]]*$//')
         add_spec "$cur" "$key" "$val" "$file:$lineno" ;;
       *) die "$file:$lineno: cannot parse '$line'" ;;
     esac
@@ -303,7 +328,14 @@ stage_box() {
     shm=$(setting "$box" shm_size_gb none)
     if [ "$shm" = none ]; then echo '    shm_size_gb: None,'; else echo "    shm_size_gb: Some($shm),"; fi
     echo "    network_mode: $(setting "$box" network_mode Pasta),"
-    echo '    custom_podman_args: None,'
+    vols=$(spec_get "$box" volume | awk '!seen[$0]++')
+    if [ -n "$vols" ]; then
+      args=''
+      for v in $vols; do args="$args -v $v"; done
+      echo "    custom_podman_args: Some(\"${args# }\"),"
+    else
+      echo '    custom_podman_args: None,'
+    fi
     echo ')'
   } > "$ron"
 
@@ -314,6 +346,7 @@ stage_box() {
   done
   nm=$(setting "$box" network_mode Pasta)
   if [ "$nm" != Pasta ]; then widen="$widen network_mode=$nm"; fi
+  for v in $(spec_get "$box" volume | awk '!seen[$0]++'); do widen="$widen volume=$v"; done
   printf '%s\n' "$widen" > "$STAGE/$box.widen"
   printf '%s %s\n' "$tpl" "$fam" > "$STAGE/$box.info"
 }
@@ -325,6 +358,9 @@ host_warnings() { # host_warnings BOX: settings that need something this host do
   box=$1
   if [ "$(setting "$box" enable_kvm false)" = true ] && [ ! -e /dev/kvm ]; then echo "enable_kvm is on but /dev/kvm does not exist on this host"; fi
   if [ "$(setting "$box" expose_kfd false)" = true ] && [ ! -e /dev/kfd ]; then echo "expose_kfd is on but /dev/kfd does not exist on this host"; fi
+  for v in $(spec_get "$box" volume | awk '!seen[$0]++'); do
+    if [ ! -e "${v%%:*}" ]; then echo "volume source ${v%%:*} does not exist on this host (podman will refuse to start the container)"; fi
+  done
   if [ "$(setting "$box" expose_pipewire false)" = true ] && [ ! -e "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/pipewire-0" ]; then echo "expose_pipewire is on but no PipeWire socket was found on this host"; fi
 }
 

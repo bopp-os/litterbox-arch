@@ -95,6 +95,7 @@ template = cachyos            # cachyos (default), fedora, tumbleweed, ubuntu-la
 packages = git neovim ripgrep
 addons   = boxed-run          # Arch/CachyOS template only, because litterbox-addon is
 append   = web.extra.Dockerfile   # a Dockerfile fragment, relative to the manifest's directory (or absolute)
+volume   = ~/Projects:/home/me/Projects   # SRC:DST[:ro|rw]; repeatable
 set.expose_pipewire = true
 set.network_mode    = Pasta
 ```
@@ -103,7 +104,10 @@ The Dockerfile is upstream Litterbox's own template for the installed version (t
 `/usr/share/litterbox-sandbox/templates`) plus a marked block that installs your packages with the template's package manager, plus the
 `litterbox-addon` block, plus any `append` fragments (`-A FILE` on the command line), copied verbatim after everything else so they survive
 `--replace`. Appended text can do anything the image build can, as root, so the tool prints a note and you should only append files you wrote
-or read. Settings default to the most isolated values; the ones you widen are listed after generation, and any that need
+or read. `volume` (`-V` on the command line) is the only way to reach `custom_podman_args`: each `SRC:DST[:ro|rw]` becomes a `-v` flag
+(absolute paths, no spaces, quotes or `..`; a leading `~/` in the source is your home), so mounts can be written without allowing arbitrary podman
+flags. Every mount is listed among the settings that widen the sandbox, and a source that does not exist on this host gets a warning.
+`examples/claude.litterbox` (with `claude.extra.Dockerfile`) is a complete example. Settings default to the most isolated values; the ones you widen are listed after generation, and any that need
 something this host lacks (`/dev/kvm`, `/dev/kfd`, PipeWire) get a warning. `custom_podman_args` is deliberately not accepted, since it can
 add arbitrary podman flags: edit the `.ron` yourself if you need it. An existing definition is refused unless you pass `--replace`.
 

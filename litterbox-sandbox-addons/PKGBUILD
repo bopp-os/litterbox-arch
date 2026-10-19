@@ -1,6 +1,6 @@
 # Maintainer: BoppOS Team
 pkgname=litterbox-sandbox-addons
-pkgver=0.1.1
+pkgver=0.1.2
 pkgrel=1
 pkgdesc="Host tools for Litterbox sandboxes: assemble definitions, install addons, export apps and terminals to the desktop, update packages inside a sandbox and prune old images, with shell completions, plus the boxed-run addon (keyring and D-Bus for IDEs)"
 arch=('any')
@@ -23,10 +23,10 @@ sha256sums=('3762b09865bfc4f721bac1bc3952a632506dd3027e1499da239c09a438d5fda8'
             '0021c33d8f7a8b18eb85039252cbab0a6140f6804f028a920227d25956b1dac1'
             'a34fcd2c0db333d14deab2b9fd3493b018c42da5def0084d7e11e93e21f7f1fd'
             '90b3fbc9a709ecc81e0f9789e227cd28cd57c2fce6c712bcc453e350ac551cf0'
-            '0f1c218b2477a00638b72b21ac5e8c6dec313452e30edb97e060226f9ffcb01d'
-            '802f199c715cc50e1cec6d99e8642f111841937a9afe22ff4ff732496084a583'
-            '15e109c0e0c7050a24fb3b8cc7d7120d443b4e3567f135ba5ffb37dfb5a1409d'
-            '5671a69d84fa943838fb048304f72a7820b0b5a21126093c5691c5f32658262d'
+            '9aa5482eb4263c8b7fb6c981bc414fc735b7fd9b46e31685defcf6910714dd8c'
+            '6cf7531295b23c4da78fbdc27af9e22a526e65f1b034c581853e9bc5e08a0787'
+            '7457409eccc41616265c057a494e320184a58de14fa75d599bfa758839d4f8a2'
+            '7501ae09322c9b9483490170016aad131739c3e61676e09f65a8bbda4dea285b'
             'f0e6eb1653ce29c9888818bba85b434f44c3b39654defd84393fcd994172780e'
             'aa453c43f699e488135b8eb798c0a0179515c1445d2e5611a3e5117a16bd10f2')
 
