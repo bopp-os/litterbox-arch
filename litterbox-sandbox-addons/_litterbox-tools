@@ -130,6 +130,8 @@ _litterbox_assemble() {
     '*'{-a,--addon}'[add a litterbox-addon addon]:addon:_litterbox_addon_names' \
     '*'{-s,--set}'[a setting for the .ron file]:setting:_litterbox_settings' \
     '(-f --file)'{-f,--file}'[read boxes from a manifest]:manifest:_files' \
+    '*'{-A,--append}'[append a Dockerfile fragment]:fragment:_files' \
+    '*'{-V,--volume}'[a bind mount SRC:DST[:ro|rw]]:mount:_files' \
     '--replace[overwrite an existing definition]' \
     '(-n --dry-run)'{-n,--dry-run}'[show what would be written]' \
     '--build[run litterbox build afterwards]' \

@@ -154,11 +154,11 @@ _litterbox_assemble_cmd() {
       _litterbox_tools_reply "support_ping support_tuntap packet_forwarding expose_pipewire keep_groups enable_kvm expose_kfd unconfine_seccomp unconfine_landlock shm_size_gb network_mode"
       compopt -o nospace 2>/dev/null || true
       return ;;
-    -f | --file) compopt -o default 2>/dev/null || true; COMPREPLY=(); return ;;
+    -f | --file | -A | --append | -V | --volume) compopt -o default 2>/dev/null || true; COMPREPLY=(); return ;;
     -p | --package) COMPREPLY=(); return ;;
   esac
   if [[ $cur == -* ]]; then
-    _litterbox_tools_reply "--template --package --addon --set --file --replace --dry-run --build --list-templates --help -t -p -a -s -f -n -h"
+    _litterbox_tools_reply "--template --package --addon --set --file --append --volume --replace --dry-run --build --list-templates --help -t -p -a -s -f -A -V -n -h"
   else
     COMPREPLY=()
   fi

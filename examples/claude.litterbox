@@ -1,0 +1,37 @@
+# Example litterbox-assemble manifest: a "claude" Litterbox for Claude Code / Claude Desktop on a CachyOS znver4 host.
+# This is the author's own setup, trimmed. Read it before copying: every line decides what the sandbox can reach.
+#
+#   litterbox-assemble --file claude.litterbox            # add --replace to regenerate an existing definition
+#   litterbox build claude                                # answer No to "change the settings?"
+#
+# claude.extra.Dockerfile must sit next to this file (see `append` below).
+[claude]
+# cachyos-znver4 needs litterbox-sandbox 0.6.5-2 or later. Use cachyos (x86-64-v3) or cachyos-v4 on other CPUs.
+template = cachyos-znver4
+
+# On top of what the template installs (wayland, mesa, vulkan, openssh, git, curl, rsync, fish, xwayland-satellite, gcc).
+# The boxed-run addon brings dbus, gnome-keyring, gnome-themes-extra, glib2, gsettings-desktop-schemas, libsecret, util-linux.
+packages = noto-fonts noto-fonts-emoji ttf-dejavu
+packages = github-cli wget which less file unzip zip tree
+packages = ripgrep fd jq go-yq strace shellcheck shfmt actionlint
+packages = nodejs npm python python-pip python-pipx uv
+packages = base-devel rustup namcap pacman-contrib
+packages = skopeo cosign poppler wl-clipboard
+packages = vscodium claude-code claude-desktop
+packages = gtk3 adwaita-icon-theme hicolor-icon-theme librsvg shared-mime-info dconf
+
+# Keyring and D-Bus for apps that store tokens (VSCodium, Claude Desktop).
+addons = boxed-run
+
+# Steps a manifest cannot express (see the comments in that file). Copied verbatim and run as root at build time.
+append = claude.extra.Dockerfile
+
+# Settings. Everything not listed is the most isolated value.
+set.support_ping = true
+set.keep_groups  = true
+set.shm_size_gb  = 2
+
+# Mounts. Each one is a hole in the sandbox: only mount what the box really needs.
+volume = ~/Projects:/home/me/Projects                    # read-write: Claude can change your projects (and so can anything it runs)
+volume = ~/.config/claude-shared:/home/me/.claude-shared:ro
+# volume = /dev/bus/usb:/dev/bus/usb                     # all USB devices; only for hardware work (flashing, WebUSB)

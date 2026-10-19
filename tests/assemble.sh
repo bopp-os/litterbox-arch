@@ -185,4 +185,39 @@ clean; run --file "$W/mdir/bad.conf"
 clean; run --file "$W/mdir/m.conf" -A "$W/frag.Dockerfile"
 [ "$rc" != 0 ] && echo "$out" | grep -q 'single boxes' && ok "--append with --file is refused (put it in the manifest)" || fail "append with file"
 
+# --- volume: SRC:DST[:ro|rw] becomes "-v ..." in custom_podman_args, and nothing else can ---------------------------------------------------------------
+mkdir -p "$W/home/Projects" "$W/vsrc"
+clean; run vol -V "$W/vsrc:/home/me/src" -V /dev/bus/usb:/dev/bus/usb -V "$W/vsrc:/ro:ro" -V "$W/vsrc:/home/me/src"
+want="    custom_podman_args: Some(\"-v $W/vsrc:/home/me/src -v /dev/bus/usb:/dev/bus/usb -v $W/vsrc:/ro:ro\"),"
+[ "$rc" = 0 ] && has "$DEFS/vol.ron" "$want" && ok "--volume: each mount becomes a -v in custom_podman_args, in order, duplicates dropped" || { echo "$out"; cat "$DEFS/vol.ron"; fail "volume ron"; }
+echo "$out" | grep -q "Settings that widen.*volume=$W/vsrc:/home/me/src" && ok "volumes are listed among the settings that widen the sandbox" || { echo "$out"; fail "volume widen"; }
+clean; run vol -V "$W/nope:/x"
+[ "$rc" = 0 ] && echo "$out" | grep -q "volume source $W/nope does not exist" && ok "a volume source missing on this host gets a warning" || { echo "$out"; fail "volume missing src"; }
+clean; run vol -V \~/Projects:/home/me/Projects      # an escaped tilde: the tool expands it, not the shell
+has "$DEFS/vol.ron" "    custom_podman_args: Some(\"-v $W/home/Projects:/home/me/Projects\")," && ok "a leading tilde in the source is your home" || { echo "$out"; fail "tilde"; }
+clean; run vol
+has "$DEFS/vol.ron" '    custom_podman_args: None,' && ok "no volume: custom_podman_args stays None" || fail "volume none"
+printf '[v]\ntemplate = cachyos\nvolume = %s:/a\nvolume = /dev/bus/usb:/dev/bus/usb:rw\nset.shm_size_gb = 2\n' "$W/vsrc" > "$W/v.conf"
+clean; run --file "$W/v.conf"
+has "$DEFS/v.ron" "    custom_podman_args: Some(\"-v $W/vsrc:/a -v /dev/bus/usb:/dev/bus/usb:rw\")," && has "$DEFS/v.ron" '    shm_size_gb: Some(2),' && ok "manifest: volume lines work next to set. lines" || { echo "$out"; fail "manifest volume"; }
+for bad in 'rel:/x' '/a:rel' '/a' '/a:/b:z' '/a:/b:ro:x' '/a/../b:/c' '/a:/b//c' '/:/x' '/a b:/c' '/a:/b;id' '/a:/b"c' '/a:/b$X' '/a:/b,c'; do
+  clean; run vol -V "$bad"
+  [ "$rc" != 0 ] && [ -z "$(ls "$DEFS")" ] || { echo "accepted: $bad"; fail "bad volume $bad"; }
+done
+ok "bad volumes (relative, .., //, /, spaces, quotes, \$, ;, commas, unknown options, missing colon) are refused and write nothing"
+clean; run vol -s "custom_podman_args=-v /:/host"
+[ "$rc" != 0 ] && echo "$out" | grep -q 'use volume' && ok "set.custom_podman_args is still refused (and points at volume)" || { echo "$out"; fail "custom args still refused"; }
+
+# --- comments after a value ---------------------------------------------------------------------------------------------------------------------------------
+printf '[c]\ntemplate = cachyos   # the default\npackages = git   # one package\nset.keep_groups = true # widens\n' > "$W/c.conf"
+clean; run --file "$W/c.conf"
+[ "$rc" = 0 ] && has "$DEFS/c.ron" '    keep_groups: true,' && has "$DEFS/c.Dockerfile" 'RUN pacman -S --noconfirm --needed git' && ok "a '#' after whitespace ends a value (comments after a value work)" || { echo "$out"; fail "inline comments"; }
+
+# --- the shipped example manifest must keep working -------------------------------------------------------------------------------------------------
+mkdir -p "$W/home/Projects" "$W/home/.config/claude-shared"
+clean; run --file "$SRC/../examples/claude.litterbox"
+[ "$rc" = 0 ] && has "$DEFS/claude.ron" "    custom_podman_args: Some(\"-v $W/home/Projects:/home/me/Projects -v $W/home/.config/claude-shared:/home/me/.claude-shared:ro\")," \
+  && grep -q '^# >>> litterbox-assemble append: claude.extra.Dockerfile >>>$' "$DEFS/claude.Dockerfile" && grep -q 'cachyos-znver4' "$DEFS/claude.Dockerfile" \
+  && ok "examples/claude.litterbox assembles (znver4 template, boxed-run, appended fragment, volumes)" || { echo "$out"; fail "example manifest"; }
+
 [ "$FAILED" = 0 ] && echo "ALL PASSED" || { echo "SOME FAILED"; exit 1; }
