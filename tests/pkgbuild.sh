@@ -125,4 +125,21 @@ done
 [ -z "$drift" ] && ok "the cachyos-v4 and cachyos-znver4 templates match upstream's cachyos.Dockerfile below their FROM line" \
   || fail "CachyOS variant templates:$drift (regenerate them from upstream's cachyos.Dockerfile lines 1 and 4+ and refresh the patch + checksum)"
 
+# litterbox-sandbox package() finds the binaries in each crate's own target/ directory, or in CARGO_TARGET_DIR when the pkgbuilds CI sets it
+# (that is how it keeps a build cache between runs). Fake build output stands in for cargo.
+for mode in own shared; do
+  out="$PKGDIR/sandbox-$mode"; mkdir -p "$out"
+  if bash -c 'set -eu; cd "$1"; source ./PKGBUILD; srcdir="$2/src" pkgdir="$2/pkg"; d="$srcdir/Litterbox-$pkgver"; mkdir -p "$srcdir" "$pkgdir"
+      if [ "$3" = shared ]; then export CARGO_TARGET_DIR="$2/target"; m="$CARGO_TARGET_DIR"; i="$CARGO_TARGET_DIR"; else unset CARGO_TARGET_DIR; m="$d/litterbox/target"; i="$d/lbx-init/target"; fi
+      mkdir -p "$m/release" "$i/$_musl/release" "$d/litterbox/templates"
+      echo lbx > "$m/release/litterbox"; echo init > "$i/$_musl/release/lbx-init"; echo L > "$d/LICENSE"; echo F > "$d/litterbox/templates/t.Dockerfile"
+      cd "$srcdir"; package' _ "$ROOT/litterbox-sandbox" "$out" "$mode" >/dev/null 2>&1 \
+     && [ "$(cat "$out/pkg/usr/bin/litterbox")" = lbx ] && [ "$(cat "$out/pkg/usr/bin/lbx-init")" = init ]; then
+    ok "litterbox-sandbox package() installs both binaries ($mode target directory)"
+  else
+    fail "litterbox-sandbox package() with the $mode target directory"
+  fi
+done
+grep -q CARGO_TARGET_DIR "$ROOT/litterbox-sandbox/PKGBUILD" && ok "litterbox-sandbox/PKGBUILD mentions CARGO_TARGET_DIR (the pkgbuilds cache step keys on it)" || fail "CARGO_TARGET_DIR missing from litterbox-sandbox/PKGBUILD"
+
 [ "$FAILED" = 0 ] && echo "ALL PASSED" || { echo "SOME FAILED"; exit 1; }

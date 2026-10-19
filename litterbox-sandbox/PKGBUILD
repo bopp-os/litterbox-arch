@@ -63,9 +63,13 @@ check() {
 
 package() {
   cd "Litterbox-$pkgver"
+  # Both crates build into their own target/ directory, unless CARGO_TARGET_DIR points them at one shared directory (the
+  # pkgbuilds CI does that to keep a build cache between runs).
+  local lbx_bin="${CARGO_TARGET_DIR:-litterbox/target}/release/litterbox"
+  local init_bin="${CARGO_TARGET_DIR:-lbx-init/target}/$_musl/release/lbx-init"
   # litterbox locates lbx-init next to its own executable, so both go in /usr/bin
-  install -Dm755 litterbox/target/release/litterbox "$pkgdir/usr/bin/litterbox"
-  install -Dm755 "lbx-init/target/$_musl/release/lbx-init" "$pkgdir/usr/bin/lbx-init"
+  install -Dm755 "$lbx_bin" "$pkgdir/usr/bin/litterbox"
+  install -Dm755 "$init_bin" "$pkgdir/usr/bin/lbx-init"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   # The Dockerfile templates `litterbox define` offers, as plain files: litterbox-assemble starts from these,
   # so it always matches the installed version.
