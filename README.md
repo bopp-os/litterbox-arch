@@ -73,8 +73,13 @@ once to run the update. The package manager comes from the distribution (Arch fa
 `apt-get update && apt-get -y upgrade`; Fedora family `dnf -y upgrade --refresh`, or `dnf5`; openSUSE Tumbleweed `zypper dup`,
 Leap `zypper up`), falling back to whatever it finds for unknown distributions. What the container reports only *selects* one of
 these fixed commands; it is sanitised and never pasted into a command. Updates are made inside the running container: they survive
-restarts but are lost when the Litterbox is rebuilt or deleted, so anything permanent belongs in its Dockerfile. If pacman fails
-with sandbox or Landlock errors inside the container, try `--no-sandbox` (pacman 7+).
+restarts but are lost when the Litterbox is rebuilt or deleted, so anything permanent belongs in its Dockerfile.
+
+pacman 7.1 tries to give hooks and install scripts their own network namespace and refuses to run them when it can't
+(`refusing to run ... with network access`). A running rootless container can't, so `litterbox-update` adds
+`--disable-sandbox-network` whenever pacman has it; `podman build` can, so Dockerfile builds are not affected. Running
+`pacman` yourself through `litterbox enter <name> --root` needs the same option. If pacman fails with other sandbox or
+Landlock errors, try `--no-sandbox` (pacman 7+).
 
 **`litterbox-assemble`** (host) generates a Litterbox definition, `~/Litterbox/definitions/<name>.Dockerfile` and `<name>.ron`, from a template, a
 package list, addons and settings, so a new sandbox with your usual tools is one command. It never builds anything unless you add `--build`.
@@ -210,7 +215,8 @@ Known unverified points:
 * `--tty true --interactive true` (used for terminal apps and interactive `--bin` wrappers) is inferred from Litterbox's argument definitions, not run.
 * Litterbox's join-without-quoting behaviour is read from its source (`lbx-init`), and the tests emulate it with `sh` and with real fish
   (every default template makes fish the login shell). Nothing here has been run against the real Litterbox.
-* `litterbox-update` has not run against a real container: whether pacman's download sandbox works as root inside rootless Podman is untested.
+* `litterbox-update` has run against a real CachyOS Litterbox (pacman 7.1, rootless Podman): the download sandbox works as root, but
+  hooks and install scripts were refused until `--disable-sandbox-network` was added. Other distributions are untested.
 * The `.ron` that `litterbox-assemble` writes follows the structure of Litterbox's own settings code and is complete, but it has never been fed to a
   real `litterbox build`. Litterbox rewrites the file in its own format after loading it.
 * The zsh completion file was written without a zsh to test with. bash and fish (real fish 4.9.3) are tested; the fish login-shell quoting
