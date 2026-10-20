@@ -3,6 +3,8 @@
 # or have it on PATH); zsh is only syntax-checked if present. Fixtures stand in for ~/Litterbox, the addons
 # directory and the template directory.
 set -u
+# The expected lists are in byte order (--help before dev); a UTF-8 locale's sort ignores the dashes
+export LC_ALL=C
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 SRC="$ROOT/litterbox-sandbox-addons"
 W=$(mktemp -d)
