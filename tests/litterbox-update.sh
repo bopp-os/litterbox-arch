@@ -177,7 +177,9 @@ done
 run_update; [ "$rc" = 1 ] && echo "$out" | grep -q '^Usage:' && ok "no arguments prints usage" || fail "usage"
 run_update --help >/dev/null; [ "$rc" = 0 ] && ok "--help exits 0" || fail "help"
 run_update --bogus dev; [ "$rc" != 0 ] && ok "unknown option is refused" || fail "unknown option"
-out=$(env PATH="/usr/bin:/bin" HOME="$W/home" sh "$SCRIPT" dev 2>&1); rc=$?
+# A PATH with nothing but sh: /usr/bin may hold a real litterbox (it does on BoppOS)
+mkdir -p "$W/only-sh" && ln -sf "$(command -v sh)" "$W/only-sh/sh"
+out=$(env PATH="$W/only-sh" HOME="$W/home" sh "$SCRIPT" dev 2>&1); rc=$?
 [ "$rc" != 0 ] && echo "$out" | grep -q 'litterbox is not installed' && ok "missing litterbox is a clear error" || fail "missing litterbox"
 
 # --- the container shell must never see backslashes or stray quotes ------------------------------------------------------------------------
