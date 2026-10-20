@@ -25,13 +25,17 @@ Usage: litterbox-update [options] <name>...
 Updates the packages inside the named Litterbox(es) as root, picking the package manager from the
 container's os-release:
 
-  Arch family (arch, cachyos, endeavouros, manjaro, ...)   pacman -Syu --noconfirm
+  Arch family (arch, cachyos, endeavouros, manjaro, ...)   pacman -Syu --noconfirm [--disable-sandbox-network]
   Debian family (debian, ubuntu, mint, ...)                 apt-get update && apt-get -y upgrade
   Fedora family (fedora, rhel, rocky, alma, ...)            dnf -y upgrade --refresh (dnf5 if that is all there is)
   openSUSE Tumbleweed / Slowroll                            zypper refresh && zypper dup
   openSUSE Leap / SLES                                      zypper refresh && zypper up
 
 If the distribution is not recognised it falls back to whichever of those package managers it finds.
+
+pacman 7.1 and newer refuse to run hooks (systemd, icon cache, desktop database, ...) when they cannot put
+them in their own network namespace, which a rootless container does not allow. When pacman has the option,
+--disable-sandbox-network is added so those hooks run.
 
 Options:
   -n, --dry-run     Look at the container and print what would run; change nothing
@@ -53,7 +57,7 @@ valid_name() {
 
 # --- what the container tells us (fixed script: no single quotes, no backslashes) --------------------------------
 # shellcheck disable=SC2016 # $t must reach the container's shell unexpanded
-PROBE='grep -E "^(ID|ID_LIKE|VERSION_ID)=" /etc/os-release 2>/dev/null; for t in pacman apt-get dnf dnf5 zypper; do command -v $t >/dev/null 2>&1 && echo "have=$t"; done; pacman --help 2>&1 | grep -q -- --disable-sandbox && echo "pacman_disable_sandbox=1"; true'
+PROBE='grep -E "^(ID|ID_LIKE|VERSION_ID)=" /etc/os-release 2>/dev/null; for t in pacman apt-get dnf dnf5 zypper; do command -v $t >/dev/null 2>&1 && echo "have=$t"; done; pacman -S --help 2>&1 | grep -qE -- "--disable-sandbox( |$)" && echo "pacman_disable_sandbox=1"; pacman -S --help 2>&1 | grep -qE -- "--disable-sandbox-network( |$)" && echo "pacman_disable_sandbox_network=1"; true'
 
 # clean VALUE: lowercase, strip quotes, keep only [a-z0-9._ -], at most 80 characters
 clean() { printf '%s' "$1" | tr -d '"'"'" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9._ -' | cut -c1-80; }
@@ -93,7 +97,7 @@ update_one() {
     || { echo "litterbox-update: could not run a command in '$name' (is it built? try: litterbox build $name)" >&2; return 1; }
   probe_out=$(printf '%s\n' "$probe_out" | tr -cd '[:print:]\n' | cut -c1-200)
 
-  os_id=''; os_like=''; os_ver=''; have=' '; can_nosandbox=0
+  os_id=''; os_like=''; os_ver=''; have=' '; can_nosandbox=0; can_nonetsandbox=0
   while IFS= read -r line; do
     case $line in
       ID=*) os_id=$(clean "${line#ID=}") ;;
@@ -101,6 +105,7 @@ update_one() {
       VERSION_ID=*) os_ver=$(clean "${line#VERSION_ID=}") ;;
       have=pacman|have=apt-get|have=dnf|have=dnf5|have=zypper) have="$have${line#have=} " ;;
       pacman_disable_sandbox=1) can_nosandbox=1 ;;
+      pacman_disable_sandbox_network=1) can_nonetsandbox=1 ;;
     esac
   done <<EOF
 $probe_out
@@ -155,7 +160,9 @@ EOF
       if [ "$no_sandbox" = 1 ]; then
         if [ "$can_nosandbox" = 1 ]; then cmd="$cmd --disable-sandbox"
         else echo "litterbox-update: '$name': this pacman has no --disable-sandbox option" >&2; return 1; fi
-      fi ;;
+      fi
+      # hooks need this in a rootless container (pacman 7.1+); see the help text
+      if [ "$can_nonetsandbox" = 1 ]; then cmd="$cmd --disable-sandbox-network"; fi ;;
     apt-get) cmd="export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get -y upgrade" ;;
     dnf|dnf5) cmd="$tool -y upgrade --refresh" ;;
     zypper)

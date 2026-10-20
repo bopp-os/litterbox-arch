@@ -47,7 +47,13 @@ mk_pm() { # a fake package manager that logs its arguments
 #!/bin/sh
 if [ "\$1" = --help ]; then
   echo "usage: $1 <operation> [...]"
-  [ -z "\${FAKE_PACMAN_SANDBOX:-}" ] || echo "      --disable-sandbox   disable the download sandbox"
+  exit 0
+fi
+if [ "\$1" = -S ] && [ "\$2" = --help ]; then # like real pacman, the sandbox options are only listed here
+  echo "usage: $1 {-S --sync} [options] [package(s)]"
+  # FAKE_PACMAN_SANDBOX: 1 = pacman 7.0 (--disable-sandbox), 2 = pacman 7.1 (also --disable-sandbox-network)
+  [ -z "\${FAKE_PACMAN_SANDBOX:-}" ] || echo "      --disable-sandbox"
+  [ "\${FAKE_PACMAN_SANDBOX:-}" != 2 ] || echo "      --disable-sandbox-network"
   exit 0
 fi
 echo "$1 \$*\${DEBIAN_FRONTEND:+ DEBIAN_FRONTEND=\$DEBIAN_FRONTEND}" >> "\$PM_LOG"
@@ -142,6 +148,12 @@ container "$OS_CACHY" pacman; run_update --dry-run dev
 
 container "$OS_CACHY" pacman; EXTRA=FAKE_PACMAN_SANDBOX=1; run_update --no-sandbox dev
 pm_log_is "pacman -Syu --noconfirm --disable-sandbox" && ok "--no-sandbox adds --disable-sandbox when pacman supports it" || { cat "$PM_LOG"; fail "no-sandbox"; }
+container "$OS_CACHY" pacman; EXTRA=FAKE_PACMAN_SANDBOX=2; run_update dev
+pm_log_is "pacman -Syu --noconfirm --disable-sandbox-network" && ok "pacman 7.1: --disable-sandbox-network is added so hooks run in a rootless box" || { cat "$PM_LOG"; fail "sandbox network"; }
+container "$OS_CACHY" pacman; EXTRA=FAKE_PACMAN_SANDBOX=1; run_update dev
+pm_log_is "pacman -Syu --noconfirm" && ok "pacman 7.0: no --disable-sandbox-network (it does not have it)" || { cat "$PM_LOG"; fail "sandbox network 7.0"; }
+container "$OS_CACHY" pacman; EXTRA=FAKE_PACMAN_SANDBOX=2; run_update --no-sandbox dev
+pm_log_is "pacman -Syu --noconfirm --disable-sandbox --disable-sandbox-network" && ok "pacman 7.1 with --no-sandbox gets both options" || { cat "$PM_LOG"; fail "no-sandbox 7.1"; }
 container "$OS_CACHY" pacman; run_update --no-sandbox dev
 [ "$rc" = 1 ] && echo "$out" | grep -q 'no --disable-sandbox option' && [ ! -s "$PM_LOG" ] && ok "--no-sandbox is refused when pacman does not support it" || fail "no-sandbox unsupported"
 container 'ID=ubuntu' apt-get; run_update --no-sandbox dev
