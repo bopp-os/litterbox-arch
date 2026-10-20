@@ -70,7 +70,9 @@ for bad in '../x' 'a b' '.hidden' 'x;ls' '$(id)'; do
 done
 run_prune --bogus; [ "$rc" != 0 ] && ok "unknown option is refused" || fail "unknown option"
 run_prune --help >/dev/null; [ "$rc" = 0 ] && ok "--help exits 0" || fail "help"
-out=$(env PATH="/usr/bin:/bin" sh "$SCRIPT" 2>&1); rc=$?
+# A PATH with nothing but sh: /usr/bin may hold a real podman (it does on BoppOS)
+mkdir -p "$W/only-sh" && ln -sf "$(command -v sh)" "$W/only-sh/sh"
+out=$(env PATH="$W/only-sh" sh "$SCRIPT" 2>&1); rc=$?
 [ "$rc" != 0 ] && echo "$out" | grep -q 'podman is not installed' && ok "missing podman is a clear error" || fail "missing podman"
 
 [ "$FAILED" = 0 ] && echo "ALL PASSED" || { echo "SOME FAILED"; exit 1; }
