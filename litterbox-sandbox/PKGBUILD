@@ -1,7 +1,7 @@
 # Maintainer: BoppOS Team
 pkgname=litterbox-sandbox
 pkgver=0.6.5
-pkgrel=3
+pkgrel=2
 pkgdesc="Somewhat isolated Podman development environments with a confirm-before-sign SSH agent"
 arch=('x86_64')
 url="https://litterbox.work"
