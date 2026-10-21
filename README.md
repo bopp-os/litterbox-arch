@@ -16,6 +16,7 @@ confirm-before-sign SSH agent) on Arch, CachyOS and BoppOS.
 | `tools/` | `update-litterbox`, `scan-release`, `publish-update`: the automation behind the update workflow. |
 | `tests/` | Offline-friendly test suites. `sh tests/run.sh` runs everything. |
 | `.github/workflows/upstream-litterbox.yml` | Daily check for new upstream releases. |
+| `.github/workflows/release.yml` | Manual release of one package (runs `tools/release`). |
 
 ## The tools in `litterbox-sandbox-addons`
 
@@ -164,7 +165,9 @@ Two packages, two independent version streams:
 | `litterbox-sandbox` | upstream Litterbox's release (`pkgver` is upstream's, `pkgrel` is our packaging revision) | the daily workflow, automatically, right after a clean update merges; by hand for a packaging-only fix (bump `pkgrel`) | `litterbox-sandbox-0.6.5-1` |
 | `litterbox-sandbox-addons` | us: it is hosted here and changes whenever we decide, regardless of Litterbox | by hand | `litterbox-sandbox-addons-0.1.0-1` |
 
-To declare a release: bump `pkgver` (or `pkgrel`) in the package's PKGBUILD, merge to `main`, then run `tools/release <package>`. It refuses unless that
+To declare a release: bump `pkgver` (or `pkgrel`) in the package's PKGBUILD, merge to `main`, then run the **Release** workflow
+(Actions tab, or `gh workflow run release.yml -f package=<package>`; add `-f dry_run=true` to preview the tag and notes). It runs
+`tools/release <package>`, which also works from a checkout. It refuses unless that
 version has no tag yet and the commit is on `origin/main`, runs the whole test suite on a clean export of the commit, and only then creates the tag
 and GitHub release (`--dry-run` shows what it would do). `pkgver` changes only when you declare a release, not with every commit.
 

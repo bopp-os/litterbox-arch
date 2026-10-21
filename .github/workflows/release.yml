@@ -1,0 +1,133 @@
+name: Release
+
+# Declares a release of one package by hand: runs tools/release, which tags <package>-<pkgver>-<pkgrel> and creates
+# the GitHub release that bopp-os/pkgbuilds builds. Use it after merging a version bump to main (for litterbox-sandbox,
+# only for a packaging-only fix; the daily update workflow releases new upstream versions itself). See README.md.
+#
+# Two jobs, like the update workflow:
+#   test     runs the whole test suite on the commit with a read-only token.
+#   release  holds the write token and only runs tools/release --skip-tests on the commit test passed.
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: 'Package to release'
+        required: true
+        type: choice
+        options:
+          - litterbox-sandbox
+          - litterbox-sandbox-addons
+      sha:
+        description: 'Commit on main to release (empty = tip of main)'
+        required: false
+        default: ''
+      dry_run:
+        description: 'Show the tag and notes only: test nothing, create nothing'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test:
+    name: Tests
+    if: ${{ github.ref == 'refs/heads/main' && inputs.dry_run != true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container: archlinux:latest
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      # archlinux:latest falls back to no other mirror, so one flaky mirror fails the job. Take the 30 best mirrors by
+      # archlinux.org's status score, then keep the 5 fastest from this runner (rankmirrors) so pacman can fall back.
+      - name: Rank mirrors
+        run: |
+          curl -fsS --retry 3 -o /tmp/status 'https://archlinux.org/mirrorlist/?protocol=https&use_mirror_status=on'
+          awk '/^#Server/ && n++ < 30 { sub(/^#/, ""); print }' /tmp/status > /tmp/mirrors
+          cp /tmp/mirrors /etc/pacman.d/mirrorlist
+          pacman -Sy --noconfirm --needed pacman-contrib
+          rankmirrors -n 5 -m 3 /tmp/mirrors > /etc/pacman.d/mirrorlist
+          cat /etc/pacman.d/mirrorlist
+
+      # Same tool list as the CI test job.
+      - name: Install tools
+        run: pacman -Syu --noconfirm --needed base-devel git jq osv-scanner namcap shellcheck fish zsh
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Mark workspace safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # Pin the commit here, so release tags exactly what was tested even if main moves in between.
+      - name: Resolve the commit
+        id: resolve
+        env:
+          SHA: ${{ inputs.sha }}
+        run: |
+          sha=$(git rev-parse --verify "${SHA:-origin/main}^{commit}") || { echo "::error::no such commit: $SHA"; exit 1; }
+          git merge-base --is-ancestor "$sha" origin/main || { echo "::error::$sha is not on main"; exit 1; }
+          git checkout -q "$sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Repository tests
+        run: sh tests/run.sh
+
+  release:
+    name: Release
+    needs: test
+    if: ${{ always() && github.ref == 'refs/heads/main' && (inputs.dry_run == true || needs.test.result == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    container: archlinux:latest
+    permissions:
+      contents: write
+    steps:
+      - name: Rank mirrors
+        run: |
+          curl -fsS --retry 3 -o /tmp/status 'https://archlinux.org/mirrorlist/?protocol=https&use_mirror_status=on'
+          awk '/^#Server/ && n++ < 30 { sub(/^#/, ""); print }' /tmp/status > /tmp/mirrors
+          cp /tmp/mirrors /etc/pacman.d/mirrorlist
+          pacman -Sy --noconfirm --needed pacman-contrib
+          rankmirrors -n 5 -m 3 /tmp/mirrors > /etc/pacman.d/mirrorlist
+          cat /etc/pacman.d/mirrorlist
+
+      - name: Install tools
+        run: pacman -Syu --noconfirm --needed git github-cli
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Mark workspace safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PACKAGE: ${{ inputs.package }}
+          TESTED_SHA: ${{ needs.test.outputs.sha }}
+          SHA: ${{ inputs.sha }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          if [ "$DRY_RUN" = true ]; then
+            sh tools/release --dry-run --sha "${SHA:-origin/main}" "$PACKAGE"
+          else
+            sh tools/release --skip-tests --sha "$TESTED_SHA" "$PACKAGE"
+          fi
