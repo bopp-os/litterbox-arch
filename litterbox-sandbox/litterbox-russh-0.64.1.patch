@@ -1,0 +1,39 @@
+Bump russh from 0.63.3 to 0.64.1 (security fix).
+
+Litterbox's SSH agent runs russh's agent protocol server on a socket the container can reach.
+russh <= 0.64.0 allocates without bound on crafted constraint records (GHSA-4wc5-f2rc-q74m), so a
+process inside a Litterbox could exhaust the host agent's memory. 0.64.1 also carries the fix for
+GHSA-j7h2-66j4-ghjf (SSH server side, which Litterbox does not use).
+
+This is upstream's own Dependabot change (Gerharddc/Litterbox#191), unchanged: only russh moves in
+Cargo.lock. Drop this patch once upstream ships a release with russh >= 0.64.1.
+
+diff --git a/litterbox/Cargo.lock b/litterbox/Cargo.lock
+index dac89b3..cc412f1 100644
+--- a/litterbox/Cargo.lock
++++ b/litterbox/Cargo.lock
+@@ -4149,9 +4149,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "russh"
+-version = "0.63.3"
++version = "0.64.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "036204edbd199552a5b3832f63c60dcdf395dc44c7f06b4af1c0e8139cc11bce"
++checksum = "ba61e87b9ec9a39a59a6bbed4c0b8ff7fb07073405b24a767a1f2c8560ac8f58"
+ dependencies = [
+  "aes",
+  "aws-lc-rs",
+diff --git a/litterbox/Cargo.toml b/litterbox/Cargo.toml
+index b681ee7..d91de7f 100644
+--- a/litterbox/Cargo.toml
++++ b/litterbox/Cargo.toml
+@@ -19,7 +19,7 @@ landlock = "0.4"
+ log = "0.4"
+ nix = { version = "0.31", features = ["fs", "inotify", "signal", "user"] }
+ ron = "0.12"
+-russh = "0.63"
++russh = "0.64"
+ serde = { version = "1.0", features = ["derive"] }
+ serde_json = "1.0"
+ strum = "0.28"
