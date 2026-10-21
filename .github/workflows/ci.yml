@@ -33,6 +33,17 @@ jobs:
     permissions:
       contents: read
     steps:
+      # archlinux:latest falls back to no other mirror, so one flaky mirror fails the job. Take the 30 best mirrors by
+      # archlinux.org's status score, then keep the 5 fastest from this runner (rankmirrors) so pacman can fall back.
+      - name: Rank mirrors
+        run: |
+          curl -fsS --retry 3 -o /tmp/status 'https://archlinux.org/mirrorlist/?protocol=https&use_mirror_status=on'
+          awk '/^#Server/ && n++ < 30 { sub(/^#/, ""); print }' /tmp/status > /tmp/mirrors
+          cp /tmp/mirrors /etc/pacman.d/mirrorlist
+          pacman -Sy --noconfirm --needed pacman-contrib
+          rankmirrors -n 5 -m 3 /tmp/mirrors > /etc/pacman.d/mirrorlist
+          cat /etc/pacman.d/mirrorlist
+
       # Same tool list as the update workflow, plus zsh so the zsh completion file is syntax-checked.
       - name: Install tools
         run: pacman -Syu --noconfirm --needed base-devel git jq osv-scanner namcap shellcheck fish zsh
@@ -59,6 +70,17 @@ jobs:
       matrix:
         package: [litterbox-sandbox, litterbox-sandbox-addons]
     steps:
+      # archlinux:latest falls back to no other mirror, so one flaky mirror fails the job. Take the 30 best mirrors by
+      # archlinux.org's status score, then keep the 5 fastest from this runner (rankmirrors) so pacman can fall back.
+      - name: Rank mirrors
+        run: |
+          curl -fsS --retry 3 -o /tmp/status 'https://archlinux.org/mirrorlist/?protocol=https&use_mirror_status=on'
+          awk '/^#Server/ && n++ < 30 { sub(/^#/, ""); print }' /tmp/status > /tmp/mirrors
+          cp /tmp/mirrors /etc/pacman.d/mirrorlist
+          pacman -Sy --noconfirm --needed pacman-contrib
+          rankmirrors -n 5 -m 3 /tmp/mirrors > /etc/pacman.d/mirrorlist
+          cat /etc/pacman.d/mirrorlist
+
       - name: Install tools
         run: pacman -Syu --noconfirm --needed base-devel git jq namcap
 
