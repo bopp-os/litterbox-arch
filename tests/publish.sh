@@ -57,6 +57,8 @@ chmod +x "$BIN/osv-stub" "$BIN/gh" "$BIN/release-stub"
 
 # --- fixture repo + fake GitHub ----------------------------------------------------------------------------
 cp "$ROOT/litterbox-sandbox/PKGBUILD" "$FX/litterbox-sandbox/PKGBUILD"
+# Pin the version the cases below are written against, so a real upstream bump does not break them.
+sed -i 's/^pkgver=.*/pkgver=0.6.5/' "$FX/litterbox-sandbox/PKGBUILD"
 cp -r "$ROOT/locks" "$FX/locks"
 cp -r "$ROOT/tools" "$FX/tools"
 git init -q --bare -b main "$ORIGIN"
