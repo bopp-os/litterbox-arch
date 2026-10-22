@@ -13,6 +13,8 @@ fail() { echo "FAIL: $*"; FAILED=1; }
 FX="$W/fx"; UP="$W/up"
 mkdir -p "$FX/litterbox-sandbox" "$FX/locks" "$UP"
 cp "$ROOT/litterbox-sandbox/PKGBUILD" "$FX/litterbox-sandbox/PKGBUILD"
+# Pin the version the cases below are written against, so a real upstream bump does not break them.
+sed -i 's/^pkgver=.*/pkgver=0.6.5/' "$FX/litterbox-sandbox/PKGBUILD"
 cp -r "$ROOT/locks/." "$FX/locks/"
 git -C "$FX" init -q -b main
 git -C "$FX" -c user.name=t -c user.email=t@example.invalid add -A
