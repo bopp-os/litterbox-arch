@@ -12,7 +12,7 @@ confirm-before-sign SSH agent) on Arch, CachyOS and BoppOS.
 |---|---|
 | `litterbox-sandbox/` | PKGBUILD that builds upstream Litterbox from its release tarball (Apache-2.0 upstream, not included here). `lbx-init` is built for the musl target and installed next to `litterbox`, which looks for it beside its own executable. |
 | `litterbox-sandbox-addons/` | PKGBUILD plus the scripts below. |
-| `locks/` | Byte-for-byte copies of upstream's three `Cargo.lock` files for the version we ship. Data only: they are the baseline for the release gate, and GitHub's Dependabot watches them for new advisories. |
+| `locks/` | Copies of the three `Cargo.lock` files we ship: upstream's, byte for byte, plus any lockfile change our own patches make. Data only: they are the baseline for the release gate, and GitHub's Dependabot watches them for new advisories. |
 | `tools/` | `update-litterbox`, `scan-release`, `publish-update`: the automation behind the update workflow. |
 | `tests/` | Offline-friendly test suites. `sh tests/run.sh` runs everything. |
 | `.github/workflows/upstream-litterbox.yml` | Daily check for new upstream releases. |
