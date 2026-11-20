@@ -1,7 +1,7 @@
 # Maintainer: BoppOS Team
 pkgname=litterbox-sandbox
 pkgver=0.6.6
-pkgrel=2
+pkgrel=3
 pkgdesc="Somewhat isolated Podman development environments with a confirm-before-sign SSH agent"
 arch=('x86_64')
 url="https://litterbox.work"
@@ -27,11 +27,13 @@ conflicts=('litterbox')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/Gerharddc/litterbox/archive/refs/tags/v$pkgver.tar.gz"
         litterbox-stable-wayland-socket.patch
         litterbox-cachyos-cpu-variants.patch
-        litterbox-russh-0.65.1.patch)
+        litterbox-russh-0.65.1.patch
+        litterbox-pageant-0.2.5.patch)
 sha256sums=('192f8cb826f3a9b2cf74be52f2b9022e345e419b339feb1587a341f650abcd61'
             'd5e249cb52a3dcf614c11413defe009dd14269118ae9f600e19be3cda8f8779a'
             '64d41d4b9d7158dc004def7cc0f8824c6539beec90da929f31ddef6166b5d560'
-            '34509af67e309bd6d6a2e54f483e8df5bf8c76edc721ab2259195779dd17263f')
+            '34509af67e309bd6d6a2e54f483e8df5bf8c76edc721ab2259195779dd17263f'
+            'a8e254fbc820756a2049787ab3d0eaa5ca152c43390a2ea57d0fc1bf20888fde')
 
 _musl=x86_64-unknown-linux-musl
 
@@ -41,9 +43,10 @@ prepare() {
   #   refreshed whenever the container starts, so a changed wayland-N name no longer breaks it.
   # litterbox-cachyos-cpu-variants: x86-64-v4 and znver4 (ghcr.io/bopp-os/cachyos-docker) CachyOS templates.
   # litterbox-russh-0.65.1: russh kex_done fix (GHSA-9264-jvgf-6w2f); drop once upstream ships russh >= 0.65.1.
+  # litterbox-pageant-0.2.5: lockfile-only pageant bump (GHSA-662x-8wvj-2276; Windows-only, not compiled here); after russh.
   # A patch that no longer applies to a new upstream release fails the build, which holds the update back.
   local p
-  for p in litterbox-stable-wayland-socket litterbox-cachyos-cpu-variants litterbox-russh-0.65.1; do
+  for p in litterbox-stable-wayland-socket litterbox-cachyos-cpu-variants litterbox-russh-0.65.1 litterbox-pageant-0.2.5; do
     patch -Np1 -i "$srcdir/$p.patch"
   done
   local host; host="$(rustc -vV | sed -n 's/host: //p')"

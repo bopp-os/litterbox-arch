@@ -179,7 +179,7 @@ Package folders hold only the PKGBUILD and its source files; `sh tests/run.sh` c
 
 ## Patches to Litterbox (`litterbox-sandbox`)
 
-`litterbox-sandbox` applies two patches to upstream's source in `prepare()`:
+`litterbox-sandbox` applies four patches to upstream's source in `prepare()`:
 
 - `litterbox-stable-wayland-socket.patch`: the container's Wayland socket is mounted from a stable per-Litterbox link
   (`$XDG_RUNTIME_DIR/litterbox/<name>/wayland-0`) that is refreshed whenever the container starts, so a compositor that comes up as a
@@ -188,6 +188,12 @@ Package folders hold only the PKGBUILD and its source files; `sh tests/run.sh` c
 - `litterbox-cachyos-cpu-variants.patch`: `litterbox define` (and `litterbox-assemble --template`) also offer `cachyos-v4`
   (`docker.io/cachyos/cachyos-v4`) and `cachyos-znver4` (`ghcr.io/bopp-os/cachyos-docker/cachyos-znver4`, built from
   [bopp-os/cachyos-docker](https://github.com/bopp-os/cachyos-docker)). The existing `cachyos` template stays x86-64-v3.
+- `litterbox-russh-0.65.1.patch`: upstream's own russh 0.64.1 → 0.65.1 bump (GHSA-9264-jvgf-6w2f), `Cargo.toml` and `Cargo.lock`.
+- `litterbox-pageant-0.2.5.patch`: pageant 0.2.4 → 0.2.5 in `litterbox/Cargo.lock` only (GHSA-662x-8wvj-2276). russh uses pageant
+  only on Windows, so it is never compiled here; the bump only clears the advisory. Applies after the russh patch.
+
+Drop the two security patches once an upstream release carries those versions itself; until then such a release fails
+`prepare()` and holds the update.
 
 A patch that stops applying to a new upstream release fails the build, so the update workflow files an Issue instead of a pull request.
 `tests/pkgbuild.sh` checks that the patches apply to the pinned release and that the two new templates still equal upstream's

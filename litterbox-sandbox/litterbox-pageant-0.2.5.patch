@@ -1,0 +1,26 @@
+Bump pageant from 0.2.4 to 0.2.5 (security fix).
+
+pageant <= 0.2.4 buffers a peer-claimed frame length of up to ~4 GiB before checking it
+(GHSA-662x-8wvj-2276, low). russh depends on pageant only under cfg(windows) and Litterbox is
+built for Linux, so the crate is never compiled here; the bump clears the advisory and keeps the
+scanners quiet.
+
+Lockfile only: 0.2.5 has the same dependencies as 0.2.4 and stays within russh's ^0.2, so only
+its version and checksum change. Applies after litterbox-russh-0.65.1. Drop this patch once
+upstream ships a release with pageant >= 0.2.5.
+
+diff --git a/litterbox/Cargo.lock b/litterbox/Cargo.lock
+--- a/litterbox/Cargo.lock
++++ b/litterbox/Cargo.lock
+@@ -3526,9 +3526,9 @@
+ 
+ [[package]]
+ name = "pageant"
+-version = "0.2.4"
++version = "0.2.5"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "f0786409b5aaa884655c9b4065681db0835db0cc185a6fb19fb17a5d38656866"
++checksum = "e0bc922d9aa8cfcf598de27b3c6122cb2eeda9d6fe71527a22ebcb7f633540ff"
+ dependencies = [
+  "base16ct",
+  "byteorder",
