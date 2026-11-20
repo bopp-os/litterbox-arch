@@ -77,6 +77,9 @@ jobs:
         env:
           INPUT_VERSION: ${{ inputs.version }}
           DRY_RUN: ${{ inputs.dry_run }}
+          # Authenticated API calls get the token's rate limit instead of the shared runner IP's
+          # anonymous one, which returns 403 once exhausted.
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -eu
           current=$(sh tools/update-litterbox --current)
